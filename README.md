@@ -1,4 +1,4 @@
-# PRISM Live Stduio
+# PRISM Live Studio
 ![LOGO](https://resource-prismlive.pstatic.net/202112161144/1585712652.png)
 
 **Visit [our official web site](http://prismlive.com) for more information and [Latest updates on PRISM Live Studio](http://prismlive.com/ko_kr/pcapp/)**.
