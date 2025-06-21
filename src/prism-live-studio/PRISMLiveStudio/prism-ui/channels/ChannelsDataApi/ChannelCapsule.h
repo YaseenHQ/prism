@@ -19,13 +19,15 @@ public:
 	/*init ui and state */
 	void setChannelID(const QString &uuid);
 	/*update ui */
-	void updateUi();
+	void updateUi(bool bPostedEvents = false);
 
 	/*get if is active by user */
 	bool isOnLine() const;
 	void setOnLine(bool isActive = true);
 
 	bool isSelectedDisplay() const;
+
+	void setDualOutput(bool bOpen);
 
 	const QString &getChannelID() const { return mInfoID; }
 
@@ -35,6 +37,8 @@ public:
 			m_pTopWiget = pWidget;
 		}
 	}
+
+	bool isYoutube();
 
 protected:
 	void changeEvent(QEvent *e) override;
@@ -65,6 +69,11 @@ private:
 	bool isPannelOutOfView() const;
 
 	void initializeConfigPannel();
+	QString translatePublicString(const QString &platform, const QString &src);
+
+	void setHorizontalOutputUI();
+	void setVerticalOutputUI();
+	void closeDualOutputUI();
 
 private slots:
 	void showConfigPannel();
@@ -82,5 +91,6 @@ private:
 };
 
 QString getStatisticsImage(const QString &src, bool isEnabled = true);
+QString &formatNumber(QString &number);
 
 #endif // CHANNELCAPSULE_H

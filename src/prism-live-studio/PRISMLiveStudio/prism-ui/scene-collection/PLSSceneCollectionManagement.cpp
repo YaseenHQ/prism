@@ -6,6 +6,9 @@
 #include <QWidgetAction>
 #include <QTimer>
 #include <QMouseEvent>
+#include "liblog.h"
+#include "log/module_names.h"
+
 using namespace common;
 
 PLSSceneCollectionManagement::PLSSceneCollectionManagement(QWidget *parent) : QFrame(parent)
@@ -20,6 +23,7 @@ PLSSceneCollectionManagement::PLSSceneCollectionManagement(QWidget *parent) : QF
 	pls_add_css(this, {"PLSSceneCollectionManagement"});
 	this->installEventFilter(this);
 	connect(ui->goBtn, &QPushButton::clicked, this, [this]() { emit ShowSceneCollectionView(); });
+	connect(ui->listview, &PLSSceneCollectionListView::TriggerEventEvent, this, &PLSSceneCollectionManagement::OnTriggerEnterEvent);
 }
 
 PLSSceneCollectionManagement::~PLSSceneCollectionManagement()
@@ -82,6 +86,22 @@ void PLSSceneCollectionManagement::Resize(int count)
 	this->resize(198, count * 40 + 3);
 }
 
+void PLSSceneCollectionManagement::OnTriggerEnterEvent(const QString &name, const QString &path)
+{
+	auto finder = [name, path](const PLSSceneCollectionData &data) { return data.fileName == name && data.filePath == path; };
+	QVector<PLSSceneCollectionData> datas = ui->listview->GetDatas();
+	auto row = -1;
+	auto iter = std::find_if(datas.begin(), datas.end(), finder);
+	if (iter != datas.end()) {
+		row = (int)(iter - datas.begin());
+	}
+
+	for (int i = 0; i < ui->listview->Count(); i++) {
+		ui->listview->SetData(i, row == i, SceneCollectionCustomRole::EnterRole);
+	}
+	ui->listview->UpdateWidgets();
+}
+
 bool PLSSceneCollectionManagement::eventFilter(QObject *obj, QEvent *event)
 {
 	if (obj == ui->buttonFrame) {
@@ -89,6 +109,7 @@ bool PLSSceneCollectionManagement::eventFilter(QObject *obj, QEvent *event)
 			auto mouseEvent = dynamic_cast<QMouseEvent *>(event);
 			if (mouseEvent->button() == Qt::LeftButton) {
 				pls_flush_style(ui->buttonFrame, STATUS, STATUS_CLICKED);
+				PLS_UI_STEP(MAIN_SCENE_COLLECTION, "scene set manager", ACTION_LBUTTON_CLICK);
 				emit ShowSceneCollectionView();
 			}
 		} else if (event->type() == QEvent::Enter) {

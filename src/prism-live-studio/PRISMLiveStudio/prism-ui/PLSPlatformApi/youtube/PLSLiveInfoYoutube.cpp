@@ -20,7 +20,7 @@
 #include "PLSRadioButton.h"
 #include <QToolTip>
 
-static const char *const liveInfoMoudule = "PLSLiveInfoYoutube";
+static const char *const liveInfoModule = "PLSLiveInfoYoutube";
 using namespace std;
 using namespace common;
 
@@ -29,7 +29,7 @@ PLSLiveInfoYoutube::PLSLiveInfoYoutube(PLSPlatformBase *pPlatformBase, QWidget *
 	ui = pls_new<Ui::PLSLiveInfoYoutube>();
 
 	pls_add_css(this, {"PLSLiveInfoYoutube"});
-	PLS_INFO(liveInfoMoudule, "Youtube liveinfo Will show");
+	PLS_INFO(liveInfoModule, "Youtube liveinfo Will show");
 	setupUi(ui);
 
 	setHasCloseButton(false);
@@ -38,10 +38,12 @@ PLSLiveInfoYoutube::PLSLiveInfoYoutube(PLSPlatformBase *pPlatformBase, QWidget *
 	content()->setFocusPolicy(Qt::StrongFocus);
 
 	auto pPlatformYoutube = PLS_PLATFORM_YOUTUBE;
-	pPlatformYoutube->liveInfoisShowing();
+	pPlatformYoutube->liveInfoIsShowing();
 	m_enteredID = PLS_PLATFORM_YOUTUBE->getSelectData()._id;
 
+	ui->dualWidget->setText(pPlatformYoutube->getPlatFormName())->setUUID(pPlatformYoutube->getChannelUUID());
 	ui->latencyRadioWidget->setEnabled(!PLS_PLATFORM_API->isLiving());
+	ui->textEditDescribe->setAcceptRichText(false);
 
 	m_isLiveStopped = PLS_PLATFORM_YOUTUBE->isSelfStopping();
 	setupFirstUI();
@@ -62,7 +64,9 @@ PLSLiveInfoYoutube::PLSLiveInfoYoutube(PLSPlatformBase *pPlatformBase, QWidget *
 	ui->rehearsalButton->setVisible(PLS_PLATFORM_API->isPrepareLive() && PLSCHANNELS_API->currentSelectedCount() == 1);
 
 	ui->sPushButton->setButtonEnable(!PLS_PLATFORM_API->isLiving());
-	ui->thumbnailButton->setIsIgoreMinSize(true);
+	ui->thumbnailButton->setIsIgnoreMinSize(true);
+
+	PLSAPICommon::createHelpIconWidget(ui->latencyTitle, QString("<qt>%1</qt>").arg(tr("LiveInfo.latency.title.tip")), ui->formLayout, this, &PLSLiveInfoYoutube::shown);
 
 	doUpdateOkState();
 	refreshThumbnailButton();
@@ -88,7 +92,6 @@ void PLSLiveInfoYoutube::setupFirstUI()
 	ui->textEditDescribe->setPlaceholderText(tr("Live.info.Description"));
 	ui->comboBoxPublic->clear();
 	ui->comboBoxCategory->clear();
-	ui->latencyIcon->setToolTip(QString("<qt>%1</qt>").arg(tr("LiveInfo.latency.title.tip")));
 	refreshUI();
 	auto pPlatformYoutube = PLS_PLATFORM_YOUTUBE;
 	if (nullptr != pPlatformYoutube) {
@@ -103,15 +106,15 @@ void PLSLiveInfoYoutube::setupFirstUI()
 	connect(ui->notKidsRadioButton, &PLSRadioButton::clicked, this, &PLSLiveInfoYoutube::setNotKidsRadioButtonClick);
 
 	connect(ui->radioButton_normal, &PLSRadioButton::clicked, this, [this]() {
-		PLS_UI_STEP(liveInfoMoudule, "Youtube radioButton normal click", ACTION_CLICK);
+		PLS_UI_STEP(liveInfoModule, "Youtube radioButton normal click", ACTION_CLICK);
 		refreshUltraTipLabelVisible();
 	});
 	connect(ui->radioButton_low, &PLSRadioButton::clicked, this, [this]() {
-		PLS_UI_STEP(liveInfoMoudule, "Youtube radioButton low click", ACTION_CLICK);
+		PLS_UI_STEP(liveInfoModule, "Youtube radioButton low click", ACTION_CLICK);
 		refreshUltraTipLabelVisible();
 	});
 	connect(ui->radioButton_ultraLow, &PLSRadioButton::clicked, this, [this]() {
-		PLS_UI_STEP(liveInfoMoudule, "Youtube radioButton ultraLow click", ACTION_CLICK);
+		PLS_UI_STEP(liveInfoModule, "Youtube radioButton ultraLow click", ACTION_CLICK);
 		refreshUltraTipLabelVisible();
 	});
 
@@ -138,29 +141,20 @@ void PLSLiveInfoYoutube::setupFirstUI()
 		},
 		Qt::DirectConnection);
 
-	connect(ui->thumbnailButton, &PLSSelectImageButton::takeButtonClicked, this, []() { PLS_UI_STEP(liveInfoMoudule, "Youtube LiveInfo's Thumbnail Take Button", ACTION_CLICK); });
-	connect(ui->thumbnailButton, &PLSSelectImageButton::selectButtonClicked, this, []() { PLS_UI_STEP(liveInfoMoudule, "Youtube LiveInfo's Thumbnail Select Button", ACTION_CLICK); });
+	connect(ui->thumbnailButton, &PLSSelectImageButton::takeButtonClicked, this, []() { PLS_UI_STEP(liveInfoModule, "Youtube LiveInfo's Thumbnail Take Button", ACTION_CLICK); });
+	connect(ui->thumbnailButton, &PLSSelectImageButton::selectButtonClicked, this, []() { PLS_UI_STEP(liveInfoModule, "Youtube LiveInfo's Thumbnail Select Button", ACTION_CLICK); });
 	connect(ui->thumbnailButton, &PLSSelectImageButton::imageSelected, this, &PLSLiveInfoYoutube::onImageSelected);
 	connect(pPlatformYoutube, &PLSPlatformYoutube::receiveLiveStop, this, [this]() { m_isLiveStopped = true; });
 	connect(this, &PLSLiveInfoYoutube::loadingFinished, this, &PLSLiveInfoYoutube::selectScheduleCheck, Qt::QueuedConnection);
-#if defined(Q_OS_MACOS)
-	ui->latencyIcon->installEventFilter(this);
-#endif
 }
 
 void PLSLiveInfoYoutube::showEvent(QShowEvent *event)
 {
 	Q_UNUSED(event)
 	showLoading(content());
-	PLS_PLATFORM_YOUTUBE->setIsShownAlert(false);
 	auto _onNextVideo = [this](bool value) {
 		//use the new m_selectData to replace old data in schedule list
 		PLS_PLATFORM_YOUTUBE->updateScheduleListAndSort();
-		if (!value && !PLS_PLATFORM_YOUTUBE->isShownAlert()) {
-			PLS_PLATFORM_YOUTUBE->setIsShownAlert(false);
-			PLS_PLATFORM_YOUTUBE->setupApiFailedWithCode(PLSPlatformApiResult::PAR_API_FAILED);
-		}
-
 		refreshUI();
 		hideLoading();
 
@@ -184,19 +178,6 @@ void PLSLiveInfoYoutube::showEvent(QShowEvent *event)
 		},
 		this);
 	PLSLiveInfoBase::showEvent(event);
-}
-
-bool PLSLiveInfoYoutube::eventFilter(QObject *watched, QEvent *event)
-{
-#if defined(Q_OS_MACOS)
-	if (watched == ui->latencyIcon && event->type() == QEvent::ToolTip) {
-		QPoint pos = ui->latencyIcon->rect().center();
-		QPoint global = ui->latencyIcon->mapToGlobal(pos);
-		QToolTip::showText(QPoint(global.rx(), global.ry() - 20), ui->latencyIcon->toolTip(), ui->latencyIcon);
-		return true;
-	}
-#endif
-	return PLSDialogView::eventFilter(watched, event);
 }
 
 void PLSLiveInfoYoutube::refreshUI()
@@ -235,8 +216,8 @@ void PLSLiveInfoYoutube::refreshPrivacy()
 	const auto &data = pPlatformYoutube->getTempSelectData();
 	ui->comboBoxPublic->clear();
 	for (int i = 0; i < pPlatformYoutube->getPrivacyDatas().size(); i++) {
-		QString lcoalString = pPlatformYoutube->getPrivacyDatas()[i];
-		ui->comboBoxPublic->addItem(lcoalString);
+		QString localString = pPlatformYoutube->getPrivacyDatas()[i];
+		ui->comboBoxPublic->addItem(localString);
 
 		QString enString = pPlatformYoutube->getPrivacyEnglishDatas()[i];
 		if (0 == enString.compare(data.privacyStatus, Qt::CaseInsensitive)) {
@@ -250,13 +231,13 @@ void PLSLiveInfoYoutube::refreshLatency()
 	auto pPlatformYoutube = PLS_PLATFORM_YOUTUBE;
 	const auto &data = pPlatformYoutube->getTempSelectData();
 	switch (data.latency) {
-	case PLSYoutubeLatency::Normal:
+	case PLSYoutubeLiveinfoData::Latency::Normal:
 		ui->radioButton_normal->setChecked(true);
 		break;
-	case PLSYoutubeLatency::Low:
+	case PLSYoutubeLiveinfoData::Latency::Low:
 		ui->radioButton_low->setChecked(true);
 		break;
-	case PLSYoutubeLatency::UltraLow:
+	case PLSYoutubeLiveinfoData::Latency::UltraLow:
 		ui->radioButton_ultraLow->setChecked(true);
 		break;
 	default:
@@ -303,7 +284,7 @@ void PLSLiveInfoYoutube::saveTempNormalDataWhenSwitch() const
 	if (cateCount > 0 && cateCount > ui->comboBoxCategory->currentIndex()) {
 		tempData.categoryID = PLS_PLATFORM_YOUTUBE->getCategoryDatas()[ui->comboBoxCategory->currentIndex()]._id;
 	} else {
-		PLS_WARN(liveInfoMoudule, "category size invalid. all count:%d, currentIndex:%d", cateCount, ui->comboBoxCategory->currentIndex());
+		PLS_WARN(liveInfoModule, "category size invalid. all count:%d, currentIndex:%d", cateCount, ui->comboBoxCategory->currentIndex());
 		tempData.categoryID = kDefaultCategoryID;
 	}
 	tempData.privacyStatus = PLS_PLATFORM_YOUTUBE->getPrivacyEnglishDatas()[ui->comboBoxPublic->currentIndex()];
@@ -316,7 +297,7 @@ void PLSLiveInfoYoutube::saveTempNormalDataWhenSwitch() const
 
 void PLSLiveInfoYoutube::okButtonClicked()
 {
-	PLS_UI_STEP(liveInfoMoudule, "Youtube liveinfo OK Button Click", ACTION_CLICK);
+	PLS_UI_STEP(liveInfoModule, "Youtube liveinfo OK Button Click", ACTION_CLICK);
 	if (PLS_PLATFORM_API->isPrepareLive()) {
 		PLS_PLATFORM_YOUTUBE->setIsRehearsal(false);
 	}
@@ -325,14 +306,14 @@ void PLSLiveInfoYoutube::okButtonClicked()
 
 void PLSLiveInfoYoutube::cancelButtonClicked()
 {
-	PLS_UI_STEP(liveInfoMoudule, "Youtube liveinfo Cancel Button Click", ACTION_CLICK);
+	PLS_UI_STEP(liveInfoModule, "Youtube liveinfo Cancel Button Click", ACTION_CLICK);
 	reject();
 }
 
 void PLSLiveInfoYoutube::rehearsalButtonClicked()
 {
 
-	PLS_UI_STEP(liveInfoMoudule, "Youtube liveinfo Rehearsal Button Click", ACTION_CLICK);
+	PLS_UI_STEP(liveInfoModule, "Youtube liveinfo Rehearsal Button Click", ACTION_CLICK);
 	if (PLS_PLATFORM_API->isPrepareLive()) {
 		PLS_PLATFORM_YOUTUBE->setIsRehearsal(true);
 	}
@@ -342,12 +323,12 @@ void PLSLiveInfoYoutube::rehearsalButtonClicked()
 void PLSLiveInfoYoutube::saveDateWhenClickButton()
 {
 	if (m_isLiveStopped) {
-		PLS_INFO(liveInfoMoudule, "Youtube live stopped, ignore OK Button Click");
+		PLS_INFO(liveInfoModule, "Youtube live stopped, ignore OK Button Click");
 		reject();
 		return;
 	}
 	if (getIsRunLoading()) {
-		PLS_INFO(liveInfoMoudule, "Youtube ignore OK Button Click, because is loading");
+		PLS_INFO(liveInfoModule, "Youtube ignore OK Button Click, because is loading");
 		return;
 	}
 
@@ -356,17 +337,17 @@ void PLSLiveInfoYoutube::saveDateWhenClickButton()
 
 	auto _onNext = [this, pPlatformYoutube](bool isSucceed) {
 		hideLoading();
-		PLS_INFO(liveInfoMoudule, "Youtube liveinfo Save %s", (isSucceed ? "succeed" : "failed"));
+		PLS_INFO(liveInfoModule, "Youtube liveinfo Save %s", (isSucceed ? "succeed" : "failed"));
 		if (PLS_PLATFORM_API->isPrepareLive()) {
 			if (isSucceed) {
-				PLS_LOGEX(PLS_LOG_INFO, liveInfoMoudule,
+				PLS_LOGEX(PLS_LOG_INFO, liveInfoModule,
 					  {
 						  {"platformName", YOUTUBE},
 						  {"startLiveStatus", "Success"},
 					  },
 					  "YouTube start live success");
 			} else {
-				PLS_LOGEX(PLS_LOG_ERROR, liveInfoMoudule,
+				PLS_LOGEX(PLS_LOG_ERROR, liveInfoModule,
 					  {{"platformName", YOUTUBE}, {"startLiveStatus", "Failed"}, {"startLiveFailed", pPlatformYoutube->getFailedErr().toUtf8().constData()}},
 					  "YouTube start live failed");
 			}
@@ -393,13 +374,12 @@ void PLSLiveInfoYoutube::saveDateWhenClickButton()
 		}
 	}
 	pPlatformYoutube->setFailedErr("");
-	pPlatformYoutube->setlastRequestAPI("");
 	pPlatformYoutube->saveSettings(_onNext, isNeedUpdate, uiData, this);
 }
 
 void PLSLiveInfoYoutube::scheduleButtonClicked()
 {
-	PLS_UI_STEP(liveInfoMoudule, "Youtube liveinfo schedule pop button click", ACTION_CLICK);
+	PLS_UI_STEP(liveInfoModule, "Youtube liveinfo schedule pop button click", ACTION_CLICK);
 	if (!ui->sPushButton->getMenuHide()) {
 		return;
 	}
@@ -499,21 +479,21 @@ void PLSLiveInfoYoutube::reloadScheduleList()
 	}
 
 	if (!pPlatformYoutube->getTempSelectData().isNormalLive) {
-		PLSScheComboxItemData nomarlData;
-		nomarlData._id = "";
-		nomarlData.title = tr("New");
-		nomarlData.time = tr("New");
-		nomarlData.type = PLSScheComboxItemType::Ty_NormalLive;
-		m_vecItemDatas.insert(m_vecItemDatas.begin(), nomarlData);
+		PLSScheComboxItemData normalData;
+		normalData._id = "";
+		normalData.title = tr("New");
+		normalData.time = tr("New");
+		normalData.type = PLSScheComboxItemType::Ty_NormalLive;
+		m_vecItemDatas.insert(m_vecItemDatas.begin(), normalData);
 	}
 
 	if (m_vecItemDatas.empty()) {
-		PLSScheComboxItemData nomarlData;
-		nomarlData._id = "";
-		nomarlData.title = tr("New");
-		nomarlData.time = tr("LiveInfo.Youtube.no.scheduled");
-		nomarlData.type = PLSScheComboxItemType::Ty_Placehoder;
-		m_vecItemDatas.insert(m_vecItemDatas.begin(), nomarlData);
+		PLSScheComboxItemData normalData;
+		normalData._id = "";
+		normalData.title = tr("New");
+		normalData.time = tr("LiveInfo.Youtube.no.scheduled");
+		normalData.type = PLSScheComboxItemType::Ty_Placeholder;
+		m_vecItemDatas.insert(m_vecItemDatas.begin(), normalData);
 	}
 
 	ui->sPushButton->showScheduleMenu(m_vecItemDatas);
@@ -552,13 +532,13 @@ void PLSLiveInfoYoutube::refreshRadios()
 
 void PLSLiveInfoYoutube::setKidsRadioButtonClick(bool)
 {
-	PLS_UI_STEP(liveInfoMoudule, __FUNCTION__, ACTION_CLICK);
+	PLS_UI_STEP(liveInfoModule, __FUNCTION__, ACTION_CLICK);
 	doUpdateOkState();
 }
 
 void PLSLiveInfoYoutube::setNotKidsRadioButtonClick(bool)
 {
-	PLS_UI_STEP(liveInfoMoudule, __FUNCTION__, ACTION_CLICK);
+	PLS_UI_STEP(liveInfoModule, __FUNCTION__, ACTION_CLICK);
 	doUpdateOkState();
 }
 
@@ -584,15 +564,15 @@ void PLSLiveInfoYoutube::onImageSelected(const QString &imageFilePath) const
 	}
 }
 
-PLSYoutubeLatency PLSLiveInfoYoutube::getUILatency() const
+PLSYoutubeLiveinfoData::Latency PLSLiveInfoYoutube::getUILatency() const
 {
-	PLSYoutubeLatency _latency = PLSYoutubeLatency::Low;
+	auto _latency = PLSYoutubeLiveinfoData::Latency::Low;
 	if (ui->radioButton_normal->isChecked()) {
-		_latency = PLSYoutubeLatency::Normal;
+		_latency = PLSYoutubeLiveinfoData::Latency::Normal;
 	} else if (ui->radioButton_low->isChecked()) {
-		_latency = PLSYoutubeLatency::Low;
+		_latency = PLSYoutubeLiveinfoData::Latency::Low;
 	} else {
-		_latency = PLSYoutubeLatency::UltraLow;
+		_latency = PLSYoutubeLiveinfoData::Latency::UltraLow;
 	}
 	return _latency;
 }
@@ -622,7 +602,7 @@ void PLSLiveInfoYoutube::titleEdited()
 	doUpdateOkState();
 
 	auto pPlatformYoutube = PLS_PLATFORM_YOUTUBE;
-	const auto channelName = pPlatformYoutube->getInitData().value(ChannelData::g_platformName).toString();
+	const auto channelName = pPlatformYoutube->getInitData().value(ChannelData::g_channelName).toString();
 
 	if (isLargeToMax) {
 		PLSAlertView::warning(this, QTStr("Alert.Title"), QTStr("LiveInfo.Title.Length.Check.arg").arg(YoutubeTitleLengthLimit).arg(channelName));
@@ -640,7 +620,7 @@ void PLSLiveInfoYoutube::descriptionEdited()
 	if (ui->textEditDescribe->toPlainText().length() > YoutubeDescribeLengthLimit) {
 		QSignalBlocker signalBlocker(ui->textEditDescribe);
 		ui->textEditDescribe->setText(ui->textEditDescribe->toPlainText().left(YoutubeDescribeLengthLimit));
-		PLSAlertView::warning(this, QTStr("Alert.Title"), QTStr("LiveInfo.Youtube.Description.Length.Check.arg"));
+		PLSAlertView::warning(this, QTStr("Alert.Title"), QTStr("LiveInfo.Youtube.Description.Length.Check.arg").arg(PLS_PLATFORM_YOUTUBE->getChannelName()));
 	}
 
 	doUpdateOkState();

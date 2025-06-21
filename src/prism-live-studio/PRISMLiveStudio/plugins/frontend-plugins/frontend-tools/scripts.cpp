@@ -106,7 +106,7 @@ ScriptLogWindow::ScriptLogWindow() : PLSDialogView(nullptr)
 	layout->addWidget(edit);
 	layout->addLayout(buttonLayout);
 
-	setLayout(layout);
+	content()->setLayout(layout);
 	scriptLogWidget = edit;
 
 	setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
@@ -182,9 +182,9 @@ ScriptsTool::ScriptsTool(QWidget *parent) : PLSDialogView(parent), ui(new Ui_Scr
 {
 	this->setupUi(ui);
 	pls_add_css(this, {"ScriptsTool"});
-	initSize(720, 700);
+	initSize(970, 700);
 	setResizeEnabled(false);
-	setFixedSize(720, 700);
+	setFixedSize(970, 700);
 	RefreshLists();
 
 #if PYTHON_UI
@@ -336,9 +336,12 @@ void ScriptsTool::on_addScripts_clicked()
 	}
 
 	QStringList files = OpenFiles(this, QT_UTF8(obs_module_text("AddScripts")), QT_UTF8(lastBrowsedDir.c_str()), filter);
-	if (!files.count())
+	if (!files.count()) {
+#if defined(Q_OS_MACOS)
+		pls_bring_mac_window_to_front(this->winId());
+#endif
 		return;
-
+	}
 	for (const QString &file : files) {
 		lastBrowsedDir = QFileInfo(file).absolutePath().toUtf8().constData();
 
@@ -407,14 +410,14 @@ void ScriptsTool::on_scripts_customContextMenuRequested(const QPoint &pos)
 
 	obs_frontend_push_ui_translation(obs_module_get_string);
 
-	popup.addAction(tr("Add"), this, SLOT(on_addScripts_clicked()));
+	popup.addAction(tr("Add"), this, &ScriptsTool::on_addScripts_clicked);
 
 	if (item) {
 		popup.addSeparator();
-		popup.addAction(obs_module_text("Reload"), this, SLOT(on_reloadScripts_clicked()));
-		popup.addAction(obs_module_text("OpenFileLocation"), this, SLOT(OpenScriptParentDirectory()));
+		popup.addAction(obs_module_text("Reload"), this, &ScriptsTool::on_reloadScripts_clicked);
+		popup.addAction(obs_module_text("OpenFileLocation"), this, &ScriptsTool::OpenScriptParentDirectory);
 		popup.addSeparator();
-		popup.addAction(tr("Remove"), this, SLOT(on_removeScripts_clicked()));
+		popup.addAction(tr("Remove"), this, &ScriptsTool::on_removeScripts_clicked);
 	}
 	obs_frontend_pop_ui_translation();
 
@@ -503,7 +506,9 @@ void ScriptsTool::on_scripts_currentRowChanged(int row)
 
 	OBSDataAutoRelease settings = obs_script_get_settings(script);
 
-	propertiesView = new OBSPropertiesView(settings.Get(), script, (PropertiesReloadCallback)obs_script_get_properties, nullptr, (PropertiesVisualUpdateCb)obs_script_update);
+	auto _propertiesView = new OBSPropertiesView(settings.Get(), script, (PropertiesReloadCallback)obs_script_get_properties, nullptr, (PropertiesVisualUpdateCb)obs_script_update);
+	_propertiesView->SetDeferrable(false);
+	propertiesView = _propertiesView;
 	ui->propertiesLayout->addWidget(propertiesView);
 	ui->description->setText(obs_script_get_description(script));
 }

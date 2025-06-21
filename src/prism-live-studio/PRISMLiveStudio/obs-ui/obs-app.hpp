@@ -20,6 +20,12 @@
 #include <QApplication>
 #include <QTranslator>
 #include <QPointer>
+#include <QFileSystemWatcher>
+#ifndef _WIN32
+#include <QSocketNotifier>
+#else
+#include <QSessionManager>
+#endif
 #include <obs.hpp>
 #include <util/lexer.h>
 #include <util/profiler.h>
@@ -33,7 +39,7 @@
 #include <vector>
 #include <deque>
 
-#include <PLSUiApp.h>
+#include <PLSUIApp.h>
 
 #include "window-main.hpp"
 #include "PLSMainView.hpp"
@@ -48,8 +54,9 @@ std::string GenerateSpecifiedFilename(const char *extension, bool noSpace,
 				      const char *format);
 std::string GetFormatString(const char *format, const char *prefix,
 			    const char *suffix);
-std::string GetOutputFilename(const char *path, const char *ext, bool noSpace,
-			      bool overwrite, const char *format);
+std::string GetFormatExt(const char *container);
+std::string GetOutputFilename(const char *path, const char *container,
+			      bool noSpace, bool overwrite, const char *format);
 QObject *CreateShortcutFilter(QObject *parent);
 
 struct BaseLexer {
@@ -74,12 +81,6 @@ public:
 
 typedef std::function<void()> VoidFunc;
 
-struct OBSThemeMeta {
-	bool dark;
-	std::string parent;
-	std::string author;
-};
-
 struct UpdateBranch {
 	QString name;
 	QString display_name;
@@ -96,9 +97,7 @@ class OBSApp : public PLSUiApp {
 
 private:
 	std::string locale;
-	std::string theme;
 
-	bool themeDarkMode = true;
 	ConfigFile globalConfig;
 	TextLookup textLookup;
 	QPointer<PLSMainView> mainView;
@@ -126,19 +125,21 @@ private:
 	bool InitGlobalConfig();
 	bool InitGlobalConfigDefaults();
 	bool InitLocale();
-	bool InitTheme();
 	bool HotkeyEnable() const;
 	inline void ResetHotkeyState(bool inFocus);
 
 	QPalette defaultPalette;
 
-	void ParseExtraThemeData(const char *path);
-	static OBSThemeMeta *ParseThemeMeta(const char *path);
-	void AddExtraThemeColor(QPalette &pal, int group, const char *name,
-				uint32_t color);
-
 protected:
 	bool notify(QObject *receiver, QEvent *e) override;
+
+#ifndef _WIN32
+	static int sigintFd[2];
+	QSocketNotifier *snInt = nullptr;
+#else
+private slots:
+	void commitData(QSessionManager &manager);
+#endif
 
 public:
 	OBSApp(int &argc, char **argv, profiler_name_store_t *store);
@@ -161,11 +162,10 @@ public:
 
 	inline const char *GetLocale() const { return locale.c_str(); }
 
-	inline const char *GetTheme() const { return theme.c_str(); }
-	std::string GetTheme(std::string name, std::string path);
-	std::string SetParentTheme(std::string name);
-	bool SetTheme(std::string name, std::string path = "");
-	inline bool IsThemeDark() const { return themeDarkMode; };
+	bool IsThemeDark() const
+	{
+		return false;
+	}
 
 	void SetBranchData(const std::string &data);
 	std::vector<UpdateBranch> GetBranches();
@@ -189,7 +189,7 @@ public:
 
 	const char *GetLastCrashLog() const;
 
-	std::string GetVersionString() const;
+	std::string GetVersionString(bool platform = true) const;
 	bool IsPortableMode();
 	bool IsUpdaterDisabled();
 	bool IsMissingFilesCheckDisabled();
@@ -229,14 +229,16 @@ public:
 	}
 
 	inline void PopUITranslation() { translatorHooks.pop_front(); }
-
+#ifndef _WIN32
+	static void SigIntSignalHandler(int);
+#endif
 	static void deleteOldestFile(bool has_prefix, const char *location);
 
 public slots:
 	void Exec(VoidFunc func);
+	void ProcessSigInt();
 
 signals:
-	void StyleChanged();
 	void HotKeyEnabled(bool);
 };
 
@@ -261,7 +263,10 @@ inline const char *Str(const char *lookup)
 {
 	return App()->GetString(lookup);
 }
-#define QTStr(lookupVal) QString::fromUtf8(Str(lookupVal))
+inline QString QTStr(const char *lookupVal)
+{
+	return QString::fromUtf8(Str(lookupVal));
+}
 
 bool GetFileSafeName(const char *name, std::string &file);
 bool GetClosestUnusedFileName(std::string &path, const char *extension);
@@ -280,17 +285,22 @@ struct GlobalVars {
 	static bool isLogined;
 	static std::chrono::steady_clock::time_point startTime;
 	static std::string prismSession;
+	static std::string prismSubSession;
 	static std::string videoAdapter;
 	static std::string crashFileMutexUuid;
-	static std::string prism_cpuName;
 
 	static bool portable_mode;
 	static bool steam;
+	static bool safe_mode;
+	static bool disable_3p_plugins;
+	static bool restart;
+	static bool restart_safe;
+	static QStringList arguments;
+
 	static bool remuxAfterRecord;
 	static std::string remuxFilename;
 	static std::string logUserID;
 	static std::string maskingLogUserID;
-	static std::string cur_dx_version;
 	static bool opt_start_streaming;
 	static bool opt_start_recording;
 	static bool opt_start_replaybuffer;
@@ -304,8 +314,15 @@ struct GlobalVars {
 	static std::string opt_starting_scene;
 	static std::string gcc;
 	static QStringList gpuNames;
-	static bool restart;
 	static QPointer<OBSLogViewer> obsLogViewer;
+
+	static bool isStartByDaemon;
+	static bool g_bUseAPIServer;
+
+#ifdef ENABLE_TEST
+	static bool unitTest;
+	static int unitTestExitCode;
+#endif
 };
 
 #ifdef _WIN32

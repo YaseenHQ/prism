@@ -2,6 +2,7 @@
 #if _WIN32
 #include <WS2tcpip.h>
 #include <Windows.h>
+#include <ShlObj.h>
 #include "windows/PLSParseDumpFile.h"
 #include "windows/PLSSoftStatistic.h"
 #else
@@ -24,6 +25,9 @@
 #include <memory>
 #include <QDir>
 
+#define PTS_LOG_TYPE "PTSLogType" // field name for log type
+#define PTS_TYPE_EVENT "event"    // field value for exception or app stats
+
 namespace pls {
 
 const static QString RESOURCE_PATH = "\\data\\prism-studio";
@@ -32,7 +36,13 @@ const static QString INSTALL_AUDIO_CAPTURE_PATH = "\\prism-plugins\\laboratory-w
 const static QString USER_AUDIO_CAPTURE_PATH = "PRISMLiveStudio\\laboratory\\win-capture-audio\\laboratory-win-capture-audio.dll";
 
 const static QString PRISM_CRASH_CONFIG_PATH = "PRISMLiveStudio\\crashDump\\crash.json";
+#if _WIN32
 const static QString PROCESS_CRASH_FILE = "PRISMLiveStudio\\crashDump\\process.json";
+const static QString THIRD_PARTY_CRASH_FILE = "PRISMLiveStudio\\crashDump\\third_party_crash.json";
+#else
+const static QString PROCESS_CRASH_FILE = "PRISMLiveStudio/crashDump/process.json";
+const static QString THIRD_PARTY_CRASH_FILE = "PRISMLiveStudio/crashDump/third_party_crash.json";
+#endif
 const static QString MODULES_FILE = "\\PRISMLiveStudio\\crashDump\\modules.json";
 const static QString GPOP_FILE = "\\user\\gpop.json";
 
@@ -105,20 +115,62 @@ static std::map<std::string, std::string, std::less<>> log_ctx(const std::string
 
 #if _WIN32
 
+void utf8_to_unicode(const char* utf8, wchar_t* unicode)
+{
+	if (!utf8 || !utf8[0] || !unicode) {
+		return;
+	}
+	if (int unicode_length = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0); unicode_length > 0) {
+		MultiByteToWideChar(CP_UTF8, 0, utf8, -1, unicode, unicode_length);
+		return;
+	}
+	return;
+}
+
+void unicode_to_utf8(const wchar_t* unicode, char *utf8)
+{
+	if (!unicode || !unicode[0] || !utf8) {
+		return;
+	}
+	if (int utf8_length = WideCharToMultiByte(CP_UTF8, 0, unicode, -1, nullptr, 0, nullptr, nullptr); utf8_length > 0) {
+		WideCharToMultiByte(CP_UTF8, 0, unicode, -1, utf8, utf8_length, nullptr, nullptr);
+		return;
+	}
+	return;
+}
+
 LONG WINAPI unhandled_exception_filter(struct _EXCEPTION_POINTERS *pExceptionPointers)
 {
 	SYSTEMTIME st;
 	::GetLocalTime(&st);
 
-	std::string strUserPath;
-	if (StaticValue::info.dump_path.empty())
-		strUserPath = get_app_data_dir("PRISMLiveStudio\\crashDump\\").toStdString();
-	else
-		strUserPath = StaticValue::info.dump_file;
+	wchar_t strUserPath[MAX_PATH] = {};
+	if (StaticValue::info.dump_path.empty()) {
+		SHGetFolderPath(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, strUserPath);
+		const wchar_t* name = L"\\PRISMLiveStudio\\crashDump\\";
+		size_t len = wcslen(name);
+		wcsncat(strUserPath, name, sizeof(strUserPath) / sizeof(strUserPath[0]) - len - 1);
+	}
+	else {
+		wchar_t unicode[MAX_PATH] = {};
+		utf8_to_unicode(StaticValue::info.dump_file.data(), unicode);
+		wcscpy(strUserPath, unicode);
+	}
+
+	int err = SHCreateDirectoryEx(0, strUserPath, 0);
+	bool successed = (ERROR_SUCCESS == err || ERROR_ALREADY_EXISTS == err);
+	if (!successed) {
+		//Note: 0x6000 is init_exception_code::crashed_exit_code
+		pls_process_terminate(0x6000);
+		return EXCEPTION_EXECUTE_HANDLER;
+	}
+
+	wchar_t unicodeProcessName[MAX_PATH] = {};
+	utf8_to_unicode(StaticValue::info.process_name.data(), unicodeProcessName);
 
 	std::array<wchar_t, MAX_PATH> path;
-	swprintf_s(path.data(), path.size(), L"%s%s.%d.%04d_%02d_%02d_%02d_%02d_%02d_%03d.dmp", pls_utf8_to_unicode(strUserPath.c_str()).c_str(),
-		   pls_utf8_to_unicode(StaticValue::info.process_name.c_str()).c_str(),
+	swprintf_s(path.data(), path.size(), L"%s%s.%d.%04d_%02d_%02d_%02d_%02d_%02d_%03d.dmp", strUserPath,
+		unicodeProcessName,
 		   GetCurrentProcessId(), st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
 
 	HANDLE lhDumpFile = CreateFileW(path.data(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -133,12 +185,14 @@ LONG WINAPI unhandled_exception_filter(struct _EXCEPTION_POINTERS *pExceptionPoi
 		CloseHandle(lhDumpFile);
 
 		if (StaticValue::info.sync_send_dump) {
-			StaticValue::info.dump_file = pls_unicode_to_utf8(path.data());
+			StaticValue::info.dump_file.resize(MAX_PATH);
+			unicode_to_utf8(path.data(), StaticValue::info.dump_file.data());
 			StaticValue::info.pid = std::to_string(GetCurrentProcessId());
 			analysis_stack_and_send_dump(StaticValue::info, StaticValue::info.analysis_stack);
 		}
 	}
-
+	//Note: 0x6000 is init_exception_code::crashed_exit_code
+	pls_process_terminate(0x6000);
 	return EXCEPTION_EXECUTE_HANDLER;
 }
 
@@ -203,11 +257,11 @@ static bool find_module_by_record(const QJsonArray modules, ULONG64 addr, ULONG6
 	for (const auto &item : modules) {
 		auto mod = item.toObject();
 		quint64 base = mod["modBaseAddr"].toString().toULongLong(&ok, 16);
-		qint64 end = mod["modEndAddr"].toString().toULongLong(&ok, 16);
+		quint64 size = (ULONG32)mod["SizeOfImage"].toInteger();
+		auto end = base + size;
 		if (addr >= base && addr <= end) {
 			moduleInfo.BaseOfImage = base;
-			moduleInfo.SizeOfImage = (ULONG32)mod["SizeOfImage"].toInteger();
-			moduleInfo.bInternal = mod["bInternal"].toBool();
+			moduleInfo.SizeOfImage = size;
 			mod["ModuleName"].toString().toWCharArray(moduleInfo.ModuleName.data());
 
 			offset = addr - moduleInfo.BaseOfImage;
@@ -233,6 +287,23 @@ static bool find_module(const std::vector<ModuleInfo> &modules, const QJsonArray
 	if (!find) {
 		find = find_module_by_record(modulesJson, addr, offset, moduleInfo);
 	}
+
+	if (find) {
+		auto exePath = pls_get_app_dir().toStdString();
+		std::filesystem::path exelocalPath(std::filesystem::u8path(exePath));
+		auto localPath = exelocalPath.parent_path().parent_path().u8string();
+		std::filesystem::path obsPlugins(std::filesystem::u8path(localPath.append("\\obs-plugins\\64bit")));
+		std::filesystem::path prismPlugins(std::filesystem::u8path(localPath.append("\\prism-plugins\\64bit")));
+
+		std::string module_name = pls_unicode_to_utf8(moduleInfo.ModuleName.data());
+		std::filesystem::path pathObj(std::filesystem::u8path(module_name));
+		auto path = pathObj.parent_path();
+		std::filesystem::path absolute_path = std::filesystem::weakly_canonical(path);
+		if (0 == absolute_path.compare(exelocalPath) || 0 == absolute_path.compare(obsPlugins) || 0 == absolute_path.compare(prismPlugins))
+			moduleInfo.bInternal = true;
+		else
+			moduleInfo.bInternal = false;
+    }
 
 	return find;
 }
@@ -342,10 +413,10 @@ static bool send_data(const std::string &post_bodfy)
 static QJsonObject get_blacklist()
 {
 #if _WIN32
-	QString syncName = "PRISMLiveStudio\\library\\library_Policy_PC\\BlackList.json";
+	QString syncName = "PRISMLiveStudio\\resources\\library\\library_Policy_PC\\BlackList.json";
 	QString localName = "..\\..\\data\\prism-studio\\user\\BlackList.json";
 #else
-	QString syncName = "PRISMLiveStudio/library/library_Policy_PC/BlackList.json";
+	QString syncName = "PRISMLiveStudio/resources/library/library_Policy_PC/BlackList.json";
 	QString localName = "data/prism-studio/user/BlackList.json";
 #endif
 
@@ -500,6 +571,114 @@ static bool check_blacklist(QString value, QJsonObject blacklist, ProcessInfo co
 
 	return false;
 }
+	
+std::optional<ThirdPartyPlugin> check_third_party_crash(std::string& plugin_path) {
+	static auto file = get_app_data_dir(THIRD_PARTY_CRASH_FILE);
+	static auto data = pls_read_data(file);
+	QJsonArray plugin_list = QJsonDocument::fromJson(data).array();
+	
+	auto path = std::filesystem::u8path(plugin_path);
+	std::string plugin_version = get_plugin_version(plugin_path);
+
+	auto plugin_name = path.stem().string();
+	
+	struct ThirdPartyPlugin plugin;
+	
+	for (qsizetype i = 0; i < plugin_list.size(); i++) {
+		auto pluginObject = plugin_list.at(i).toObject();
+		if (pluginObject["name"].toString() == QString::fromStdString(plugin_name)
+			&& pluginObject["version"].toString().toStdString() == plugin_version) {
+			
+			plugin.name = plugin_name;
+			plugin.confirmed = pluginObject["confirmed"].toBool();
+			plugin.version = plugin_version;
+			
+			pluginObject["confirmed"] = true;
+			
+			plugin_list.replace(i, QJsonValue(pluginObject));
+			
+			QJsonDocument doc;
+			doc.setArray(plugin_list);
+			pls_write_data(file, doc.toJson());
+			
+			return plugin;
+		}
+	}
+	
+	return std::nullopt;
+}
+
+#ifndef ENABLE_TEST
+static
+#endif
+bool check_third_party_crash(ProcessInfo &info, std::string &stack_hash, std::string &plugin_name, std::string &plugin_path) {
+	if (plugin_name.empty() || plugin_path.empty()) {
+		return false;
+	}
+	
+	auto file = get_app_data_dir(PROCESS_CRASH_FILE);
+	auto data = pls_read_data(file);
+	if (data.isEmpty()) {
+		if (StaticValue::do_log)
+			StaticValue::do_log(log_ctx("Read process file failed.(Maybe this is the first crash)."));
+	}
+	
+	QJsonObject obj = QJsonDocument::fromJson(data).object();
+	QJsonArray processes = obj["Processes"].toArray();
+	
+	if (processes.size() < 3) {
+		return false;
+	}
+
+	int same_hash_count = 0;
+	int checked_count = 0;
+	auto it = processes.end();
+
+	// Check last 3 items from the end
+	while (checked_count < 3 && it != processes.begin()) {
+		--it;
+		QJsonObject curProcess = it->toObject();
+		std::string location = curProcess["location"].toString().toStdString();
+		if (location.find(plugin_name) != std::string::npos) {
+			same_hash_count++;
+		}
+		checked_count++;
+	}
+
+	if (same_hash_count != 3) {
+		return false;
+	}
+
+	bool record_found = false;
+	auto third_crash_file = get_app_data_dir(THIRD_PARTY_CRASH_FILE);
+	auto third_crash_data = pls_read_data(file);
+	QJsonArray plugin_list = QJsonDocument::fromJson(third_crash_data).array();
+	
+	std::string plugin_version = get_plugin_version(plugin_path);
+		
+	for (auto it = plugin_list.begin(); it != plugin_list.end(); it++) {
+		QJsonObject plugin = it->toObject();
+		if (plugin["name"].toString().toStdString() == plugin_name &&
+			plugin["version"].toString().toStdString() == plugin_version) {
+			record_found = true;
+			break;
+		}
+	}
+	
+	if (!record_found) {
+		QJsonObject plugin;
+		plugin["name"] = QString::fromStdString(plugin_name);
+		plugin["version"] = QString::fromStdString(plugin_version);
+		plugin["confirmed"] = false;
+		plugin_list.push_back(plugin);
+		
+		QJsonDocument doc;
+		doc.setArray(plugin_list);
+		pls_write_data(third_crash_file, doc.toJson());
+	}
+	
+	return record_found;
+}
 
 static bool check_device_thread(QJsonObject device, QString &target)
 {
@@ -631,14 +810,29 @@ static void check_mainprocess_info(ProcessInfo const &info, const std::string &c
 	return;
 }
 
-static bool check_repeat_crash(ProcessInfo const &info, const std::string &location, const std::string &stack_hash)
+static int check_repeat_crash_count(QJsonObject &obj, const std::string &stack_hash, std::string version)
+{
+	QJsonArray processes = obj["Processes"].toArray();
+
+	int crash_count = 0;
+	for (auto it = processes.begin(); it != processes.end(); it++) {
+		QJsonObject curProcess = it->toObject();
+		std::string prevStackHash = curProcess.value("stackHash").toString().toStdString();
+		std::string crash_version = curProcess.value("version").toString().toStdString();
+		if (0 == prevStackHash.compare(stack_hash) && 0 == crash_version.compare(version)) {
+			crash_count++;
+		}
+	}
+
+	return crash_count;
+}
+
+#define CRASH_COUNT_LIMIT 5
+static bool check_repeat_crash(ProcessInfo const &info, const std::string &location, const QByteArray& stack_md5)
 {
 	bool repeat = false;
 	if (info.dump_type == DumpType::DT_UI_BLOCK)
 		return repeat;
-
-	QByteArray byteArray(stack_hash.c_str(), (int)stack_hash.length());
-	QByteArray stack_md5 = QCryptographicHash::hash(byteArray, QCryptographicHash::Md5).toHex();
 
 	auto file = get_app_data_dir(PROCESS_CRASH_FILE);
 	auto data = pls_read_data(file);
@@ -666,10 +860,13 @@ static bool check_repeat_crash(ProcessInfo const &info, const std::string &locat
 	if (StaticValue::do_log)
 		StaticValue::do_log(log_ctx(log));
 
+	std::string version = info.prism_version;
+
 	QJsonObject curProc;
 	curProc.insert("prismSession", info.prism_session.c_str());
 	curProc.insert("location", location.c_str());
 	curProc.insert("stackHash", stack_md5.constData());
+	curProc.insert("version", version.c_str());
 	if (!info.src.empty())
 		curProc.insert("sourcePtr", info.src.c_str());
 	processes.push_back(curProc);
@@ -685,6 +882,11 @@ static bool check_repeat_crash(ProcessInfo const &info, const std::string &locat
 	log.append("Writed process json file data : ").append(doc_data.constData());
 	if (StaticValue::do_log)
 		StaticValue::do_log(log_ctx(log));
+
+	int crash_count = check_repeat_crash_count(obj, stack_md5.constData(), version);
+	if (crash_count > CRASH_COUNT_LIMIT) {
+		repeat = true;
+	}
 
 	return repeat;
 }
@@ -778,16 +980,23 @@ static void remove_dump_file(ProcessInfo const &info)
 		StaticValue::do_log(log_ctx(log));
 }
 
-static bool send_dump(ProcessInfo const &info, std::string &crash_value, std::string &crash_type, std::string const &crash_key, std::string const &body, std::string const &location)
-{
+static bool send_dump(ProcessInfo const &info, std::string &crash_value, std::string &crash_type, std::string const &crash_key, std::string const &body, std::string const &location , std::string const &stack_offset_hash)
+	{
 	bool res = false;
 	size_t dump_len = 0;
 #if _WIN32
 	auto dump_data = pls_read_data(info.dump_file.c_str());
 #elif __APPLE__
-    std::string data;
-    std::string dump_location;
-    mac_get_latest_dump_data_location(info, data, dump_location);
+	std::string dump_location;
+	std::string stack_hash;
+	std::string data;
+	std::set<std::map<std::string, std::string>> module_names;
+	mac_get_latest_dump_data(info, data, dump_location, stack_hash, module_names);
+
+	if (!location.empty()) {
+		dump_location = location;
+	}
+	
     QByteArray dump_data = QString::fromStdString(data).toUtf8();
 #endif
 	if (dump_data.isEmpty()) {
@@ -826,7 +1035,7 @@ static bool send_dump(ProcessInfo const &info, std::string &crash_value, std::st
 	nelo_info.insert("DmpSymbol", "Required");
     
 #if __APPLE__
-    nelo_info.insert("DeviceName", get_device_name().c_str());
+    nelo_info.insert("DeviceModel", get_device_model().c_str());
     nelo_info.insert("DumpLocation", dump_location.c_str());
 #endif
 
@@ -858,6 +1067,9 @@ static bool send_dump(ProcessInfo const &info, std::string &crash_value, std::st
 		nelo_info.insert("UserID", info.user_id.c_str());
 	if (!location.empty())
 		nelo_info.insert("DumpLocation", location.c_str());
+	if (!stack_offset_hash.empty())
+		nelo_info.insert("DumpStackTraceHashkey", stack_offset_hash.c_str());
+	nelo_info.insert(PTS_LOG_TYPE, PTS_TYPE_EVENT);
 
 	QJsonDocument doc;
 	doc.setObject(nelo_info);
@@ -886,7 +1098,7 @@ static bool send_dump(ProcessInfo const &info, std::string &crash_value, std::st
 	return res;
 }
 
-static bool parse_stacktrace_and_check_repeat(ProcessInfo &info, std::string &crash_value, std::string &crash_type, std::string &crash_key, std::string &location)
+static bool parse_stacktrace_and_check_repeat(ProcessInfo &info, std::string &crash_value, std::string &crash_type, std::string &crash_key, std::string &location, std::string& stack_offset_hash)
 {
 	std::string stack_hash = {};
 	std::string stack{};
@@ -913,6 +1125,9 @@ static bool parse_stacktrace_and_check_repeat(ProcessInfo &info, std::string &cr
 				url = localUrl.toString().toStdString();
 		}
 	}
+	
+	std::string third_module_name;
+	std::string third_module_path;
 #if _WIN32
 	std::vector<ULONG64> stack_frams = GetStackTrace(info.dump_file.c_str());
 	std::vector<ModuleInfo> modules = GetModuleInfo(info.dump_file.c_str());
@@ -927,9 +1142,21 @@ static bool parse_stacktrace_and_check_repeat(ProcessInfo &info, std::string &cr
 
 		bool success = find_module(modules, modulesJson, stack_frams[i], offset, module_info);
 		sprintf_s(offset_s.data(), offset_s.size(), "0x%llx", offset);
-		stack_hash.append(offset_s.data());
+		if (module_info.bInternal) {
+			stack_hash.append(offset_s.data());
+		}
 
 		std::string module_name = success ? pls_unicode_to_utf8(module_info.ModuleName.data()) : "unkown";
+		std::filesystem::path pathObj(std::filesystem::u8path(module_name));
+
+		module_name = pathObj.filename().u8string();
+
+		std::string pluginpath = pathObj.u8string();
+		if (success && pls::is_third_party_plugin(pluginpath)) {
+			third_module_name = module_name;
+			third_module_path = pathObj.u8string();
+		}
+
 		std::string prefix = "\n " + std::to_string(i) + " ";
 		std::string frame = module_name + " + " + offset_s.data();
 		stack.append(prefix).append(frame);
@@ -940,6 +1167,13 @@ static bool parse_stacktrace_and_check_repeat(ProcessInfo &info, std::string &cr
 		if (!find_internal && module_info.bInternal) {
 			location = frame;
 			find_internal = true;
+		}
+
+		if (info.pc_shutdown_happen && module_name.find("libcef.dll") != std::string::npos) {
+			repeat = true;
+			if (StaticValue::do_log)
+				StaticValue::do_log(log_ctx("This is libcef crash caused by shutdown. Ignore sending dump files"));
+			break;
 		}
 
 		if (info.dump_type == DumpType::DT_UI_BLOCK || find_blacklist)
@@ -954,29 +1188,37 @@ static bool parse_stacktrace_and_check_repeat(ProcessInfo &info, std::string &cr
 		}
 	}
 #elif __APPLE__
-    // parse dump data, find module names and
+    // parse dump data, find module names
     std::string dump_data;
-    std::set<std::string> module_names;
-    mac_get_latest_dump_data_module_names(info, dump_data, module_names);
+	std::set<std::map<std::string, std::string>> module_names;
+	mac_get_latest_dump_data(info, dump_data, location, stack_hash, module_names);
     if (!dump_data.empty()) {
         stack.append(dump_data);
     }
     
     // check backlist
     if (module_names.size() > 0) {
-        for (std::string module_name : module_names) {
+        for (auto module_object : module_names) {
+			auto module_name = module_object.at("object_name");
             if (check_blacklist(QString::fromStdString(module_name), blacklist, info, actionInfo, crash_type, url, local)) {
                 find_blacklist = true;
+				location = module_object.at("object_name") + " +" + module_object.at("object_addr") + " " + module_object.at("symbol_name") + " +" + module_object.at("symbol_addr");
                 crash_key = type_to_crash_key(info.dump_type, info.is_main);
                 break;
             }
         }
+		
+		for (auto module_object: module_names) {
+			auto module_name = module_object.at("object_name");
+			auto module_path = module_object.at("object_path");
+			if (pls::is_third_party_plugin(module_path)) {
+				third_module_name = module_name;
+				third_module_path = module_path;
+				break;
+			}
+		}
     }
     
-    if (info.dump_type == DumpType::DT_UI_BLOCK) {
-        repeat = true;
-    }
-
 #endif
 
 	if (!find_blacklist)
@@ -987,13 +1229,35 @@ static bool parse_stacktrace_and_check_repeat(ProcessInfo &info, std::string &cr
 	if (StaticValue::do_log)
 		StaticValue::do_log(log_ctx(log));
 
-	if (info.process_func)
-		info.process_func(location, url);
+	if (info.process_func && !repeat)
+#if __APPLE__
+        if (!dump_data.empty()) {
+#endif
+            info.process_func(location, url);
+#if __APPLE__
+        }
+#endif
 
+	if (stack_hash.empty()) {
+		stack_hash = location;
+	}
+	QByteArray byteArray(stack_hash.c_str(), (int)stack_hash.length());
+	QByteArray stack_md5 = QCryptographicHash::hash(byteArray, QCryptographicHash::Md5).toHex();
+	stack_offset_hash = stack_md5.constData();
+	if (StaticValue::do_log)
+		StaticValue::do_log(log_ctx(" DumpStackTraceHashkey : " + stack_offset_hash));
 #if _WIN32
-    repeat = check_repeat_crash(info, location, stack_hash);
+	if(!repeat)
+		repeat = check_repeat_crash(info, location, stack_md5);
     check_mainprocess_info(info, crash_type, actionInfo, location, find_blacklist);
 #endif
+	
+#if __APPLE__
+	repeat = check_repeat_crash(info, location, stack_md5);
+#endif
+	
+	std::string stack_hash_string(stack_md5);
+	check_third_party_crash(info, stack_hash_string, third_module_name, third_module_path);
 
 	return repeat;
 }
@@ -1022,21 +1286,22 @@ bool analysis_stack_and_send_dump(ProcessInfo info, bool analysis_stack)
 	std::string crash_key;
 	std::string body;
 	std::string location;
+	std::string stack_offset_hash;
 
 	init_values(info, crash_value, crash_type, crash_key, body);
 
     if (analysis_stack) {
-        bool repeat = parse_stacktrace_and_check_repeat(info, crash_value, crash_type, crash_key, location);
+        bool repeat = parse_stacktrace_and_check_repeat(info, crash_value, crash_type, crash_key, location, stack_offset_hash);
         if (repeat) {
             remove_dump_file(info);
             return false;
         }
     }
-#ifdef PRISM_BUILD_TYPE_DEBUG
+#ifdef _DEBUG
     remove_dump_file(info);
     return true;
 #else
-    return send_dump(info, crash_value, crash_type, crash_key, body, location);
+    return send_dump(info, crash_value, crash_type, crash_key, body, location, stack_offset_hash);
 #endif
 }
 
@@ -1048,7 +1313,7 @@ void catch_unhandled_exceptions(const std::string &process_name, const std::stri
 #if _WIN32
 	auto ret = SetUnhandledExceptionFilter(unhandled_exception_filter);
 #elif __APPLE__
-    mac_install_crash_reporter(process_name);
+	mac_install_crash_reporter(StaticValue::info);
 #endif
 }
 
@@ -1081,5 +1346,8 @@ void set_prism_sub_session(const std::string &session)
 {
 	StaticValue::info.prism_sub_session = session;
 }
-
+	
+	void set_prism_pid(const std::string &pid) {
+		StaticValue::info.pid = pid;
+	}
 }

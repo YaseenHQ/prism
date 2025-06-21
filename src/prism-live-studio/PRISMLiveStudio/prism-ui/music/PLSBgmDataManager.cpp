@@ -5,25 +5,27 @@
 #include <QDir>
 
 #include "frontend-api.h"
-#include "json-data-handler.hpp"
 #include "liblog.h"
 #include "log/module_names.h"
 #include "pls-common-define.hpp"
 using namespace common;
+
+std::vector<QString> musicFormat = {"*.mp3", "*.wav", "*.m4a", "*.ogg", "*.flac", "*.wma", "*.aac", "*.aif"};
+
 PLSBgmDataViewManager *PLSBgmDataViewManager::Instance()
 {
 	static PLSBgmDataViewManager instance;
 	return &instance;
 }
 
-// mp3 *.aac *.ogg *.wav
+// (*.mp3 *.aac *.ogg *.wav)  =>
+// (*.mp3 *.wav *.m4a *.ogg *.flac *.wma *.aac *.aif)
 bool PLSBgmDataViewManager::IsSupportFormat(const QString &url) const
 {
-	QString format = url.toLower().right(3);
-	if (!format.compare("mp3") || !format.compare("aac") || !format.compare("ogg") || !format.compare("wav")) {
-		return true;
-	}
-	return false;
+	QString format = url.mid(url.lastIndexOf(".") + 1).toLower();
+
+	auto iter = std::find_if(musicFormat.begin(), musicFormat.end(), [format](QString value) { return value.contains(format); });
+	return iter != musicFormat.end();
 }
 
 bool PLSBgmDataViewManager::IsSupportFormat(const QList<QUrl> urls) const
@@ -90,54 +92,6 @@ PushButtonMapType PLSBgmDataViewManager::GetGroupButtonList() const
 	return groupButtonList;
 }
 
-void PLSBgmDataViewManager::AddGroupList(const QString &group, const BgmLibraryData &bgm)
-{
-	groupMusicList.emplace_back(group, bgm);
-}
-
-void PLSBgmDataViewManager::InsertFrontGroupList(const QString &group, const BgmLibraryData &bgm)
-{
-	groupMusicList.emplace(groupMusicList.begin(), group, bgm);
-}
-
-const BgmItemGroupVectorType &PLSBgmDataViewManager::GetGroupList() const
-{
-	return groupMusicList;
-}
-
-BgmLibraryData PLSBgmDataViewManager::GetGroupList(const QString &group) const
-{
-	if (group.isEmpty()) {
-		return BgmLibraryData();
-	}
-
-	bool findGroup = false;
-	auto iterGroup = groupMusicList.cbegin();
-	for (; iterGroup != groupMusicList.cend(); ++iterGroup) {
-		if (0 == group.compare(iterGroup->first)) {
-			findGroup = true;
-			break;
-		}
-	}
-
-	if (!findGroup) {
-		return BgmLibraryData();
-	}
-
-	return iterGroup->second;
-}
-
-QString PLSBgmDataViewManager::GetFirstGroupName() const
-{
-	auto groupList = PLSBgmDataViewManager::Instance()->GetGroupList();
-	auto iter = groupList.begin();
-	if (iter == groupList.end()) {
-		return QString();
-	}
-
-	return iter->first;
-}
-
 void PLSBgmDataViewManager::AddCachePlayList(const PLSBgmItemData &data)
 {
 	bool find = CachePlayListExisted(data);
@@ -185,15 +139,23 @@ BgmItemCacheType PLSBgmDataViewManager::GetCachePlayList() const
 	return cachePlayList;
 }
 
-bool PLSBgmDataViewManager::LoadDataFormLocalFile(QByteArray &array) const
+PLSBgmItemData::PLSBgmItemData(const QString &group_, const pls::rsm::Item &item) : group(group_), _item(item)
 {
-	QString musicJsonPath = pls_get_user_path(QString(CONFIGS_MUSIC_USER_PATH).append(MUSIC_JSON_FILE));
-	if (PLSJsonDataHandler::getJsonArrayFromFile(array, musicJsonPath)) {
-		return true;
-	}
+	title = item.attr("title").toString();
+	producer = item.attr("producer").toString();
+	id = (int)DurationType::FullSeconds;
 
-	PLS_ERROR("Load %s Failed", MUSIC_JSON_FILE);
-	return false;
+	SetUrl(item.attr({"properties", "duration60SecondsMusicInfo", "url"}).toString(), (int)DurationType::SixtySeconds);
+	SetDuration((int)DurationType::SixtySeconds, item.attr({"properties", "duration60SecondsMusicInfo", "duration"}).toInt());
+
+	SetUrl(item.attr({"properties", "duration15SecondsMusicInfo", "url"}).toString(), (int)DurationType::FifteenSeconds);
+	SetDuration((int)DurationType::FifteenSeconds, item.attr({"properties", "duration15SecondsMusicInfo", "duration"}).toInt());
+
+	SetUrl(item.attr({"properties", "duration30SecondsMusicInfo", "url"}).toString(), (int)DurationType::ThirtySeconds);
+	SetDuration((int)DurationType::ThirtySeconds, item.attr({"properties", "duration30SecondsMusicInfo", "duration"}).toInt());
+
+	SetUrl(item.attr({"properties", "durationFullMusicInfo", "url"}).toString(), (int)DurationType::FullSeconds);
+	SetDuration((int)DurationType::FullSeconds, item.attr({"properties", "durationFullMusicInfo", "duration"}).toInt());
 }
 
 void PLSBgmItemData::SetUrl(const QString &url, const int &id_)

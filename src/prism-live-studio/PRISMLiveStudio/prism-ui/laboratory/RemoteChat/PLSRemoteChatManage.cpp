@@ -120,16 +120,19 @@ void PLSRemoteChatManage::openRemoteChat()
 
 	printLog("call open remote chat method");
 	if (!startWebsocketServer()) {
+		pls_alert_error_message(g_laboratoryDialog, tr("Alert.Title"), tr("laboratory.item.open.other.reason.failed.text"));
 		closeRemoteChatView();
 		return;
 	}
 
 	if (!startWebServer()) {
+		pls_alert_error_message(g_laboratoryDialog, tr("Alert.Title"), tr("laboratory.item.open.other.reason.failed.text"));
 		closeRemoteChatView();
 		return;
 	}
 
 	if (!showRemoteChatView()) {
+		pls_alert_error_message(g_laboratoryDialog, tr("Alert.Title"), tr("laboratory.item.open.other.reason.failed.text"));
 		closeRemoteChatView();
 		return;
 	}
@@ -153,15 +156,22 @@ bool PLSRemoteChatManage::startWebServer()
 	printLog("start create webserver");
 	m_tcpServer = pls_new<QTcpServer>();
 	QHostAddress ipAddress;
+	bool hasWebAddress = false;
 	QList<QHostAddress> ipAddressList = QNetworkInterface::allAddresses();
 	for (int i = 0; i < ipAddressList.size(); i++) {
 		if (ipAddressList.at(i) != QHostAddress::LocalHost && ipAddressList.at(i).toIPv4Address()) {
 			ipAddress = ipAddressList.at(i);
+			hasWebAddress = true;
 			break;
 		}
 	}
 
 	if (ipAddressList.isEmpty()) {
+		printLog("create webserver failed because the ip address list is empty");
+		return false;
+	}
+
+	if (!hasWebAddress) {
 		printLog("create webserver failed because the ip address is empty");
 		return false;
 	}
@@ -331,19 +341,14 @@ void PLSRemoteChatManage::readCommonTermJson(QJsonObject &data) const
 		return;
 	}
 
-	QByteArray byteArray;
-	PLSJsonDataHandler::getJsonArrayFromFile(byteArray, filePath);
-	if (byteArray.size() == 0) {
-		printLog("get the data under the file path is empty");
+	if (!pls_read_json(data, filePath)) {
+		printLog("read the commonTerms.json file failed");
 	}
-
-	PLSJsonDataHandler::jsonTo(byteArray, data);
 }
 
 void PLSRemoteChatManage::saveCommonTermJson(const QJsonObject &data) const
 {
-	QJsonDocument doc(data);
-	if (!PLSJsonDataHandler::saveJsonFile(doc.toJson(), getDownloadRemoteChatCommonTermJsonPath())) {
+	if (!pls_write_json(getDownloadRemoteChatCommonTermJsonPath(), data)) {
 		printLog("commonTerms.json save download lab cache failed.");
 		return;
 	}
@@ -359,7 +364,7 @@ void PLSRemoteChatManage::sendNaverShoppingNotice(const QJsonObject &data) const
 	requestJsonObject.insert("broadcastId", liveInfo.id);
 	PLSNaverShoppingLIVEAPI::sendNotice(
 		platform, requestJsonObject, this, [](const QJsonDocument &) {},
-		[](PLSAPINaverShoppingType) {
+		[](PLSAPINaverShoppingType, const QByteArray &) {
 
 		});
 }

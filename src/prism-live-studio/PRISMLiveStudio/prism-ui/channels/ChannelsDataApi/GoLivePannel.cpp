@@ -37,7 +37,13 @@ GoLivePannel::GoLivePannel(QWidget *parent) : QFrame(parent), ui(new Ui::GoLiveP
 	});
 
 	connect(PLSCHANNELS_API, &PLSChannelDataAPI::toStartBroadcast, ui->GoLiveShift, [this]() { toggleBroadcast(true); });
-	connect(PLSCHANNELS_API, &PLSChannelDataAPI::toStopBroadcast, ui->GoLiveShift, [this]() { toggleBroadcast(false); });
+	connect(PLSCHANNELS_API, &PLSChannelDataAPI::toStopBroadcast, ui->GoLiveShift, [this](DualOutputType type) {
+		if (type == DualOutputType::All) {
+			toggleBroadcast(false);
+		} else {
+			PLSBasic::instance()->StopStreaming(type);
+		}
+	});
 
 	connect(PLSCHANNELS_API, &PLSChannelDataAPI::toStartRecord, ui->Record, [this]() { toggleRecord(true); });
 	connect(PLSCHANNELS_API, &PLSChannelDataAPI::toStopRecord, ui->Record, [this]() { toggleRecord(false); });
@@ -60,6 +66,12 @@ void GoLivePannel::changeEvent(QEvent *e)
 	}
 }
 
+void GoLivePannel::showEvent(QShowEvent *event)
+{
+	setRecTooltip();
+	QFrame::showEvent(event);
+}
+
 void GoLivePannel::on_Record_toggled(bool isCheck)
 {
 	PLS_LIVE_UI_STEP("channels", isCheck ? ("Reocrd Start") : ("Record Stop "), "clicked ");
@@ -73,6 +85,36 @@ void GoLivePannel::toggleRecord(bool isStart)
 		PRE_LOG_MSG_STEP(" Wait for record state changing .... new event is ignored!", g_recordStep, INFO)
 		return;
 	}
+
+	bool bSame = PLSBasic::instance()->checkRecEncoder();
+	if (bSame && mBusyFrame->isVisible()) {
+		int state = PLSCHANNELS_API->currentBroadcastState();
+		PLS_INFO("GoLivePannel", "current BroadcastState is %d", state);
+		QString errMessage;
+		if (PLSCHANNELS_API->isRehearsaling()) {
+			if (state == BroadcastGo || state == CanBroadcastState || state == StreamStarting) {
+				errMessage = tr("StartingRehearsal.GoLiveBtnIsBusy.Text");
+			} else if (state == StopBroadcastGo || state == CanBroadcastStop || state == StreamStopping || state == StreamStopped) {
+				errMessage = tr("EndingRehearsal.GoLiveBtnIsBusy.Text");
+			}
+		} else {
+			if (state == BroadcastGo || state == CanBroadcastState || state == StreamStarting) {
+				errMessage = tr("StartingStream.GoLiveBtnIsBusy.Text");
+			} else if (state == StopBroadcastGo || state == CanBroadcastStop || state == StreamStopping || state == StreamStopped) {
+				errMessage = tr("EndingStream.GoLiveBtnIsBusy.Text");
+			}
+		}
+		if (!errMessage.isEmpty()) {
+			PLSAlertView::warning(this, tr("Alert.Title"), errMessage);
+		}
+
+		ui->Record->setDisabled(false);
+		QSignalBlocker blocker(ui->Record);
+		bool bCheck = ui->Record->isChecked();
+		ui->Record->setChecked(!bCheck);
+		return;
+	}
+
 	HolderReleaser holder(&GoLivePannel::setEnteredRecord, this);
 	bool isRecording = PLSCHANNELS_API->isRecording();
 	int state = PLSCHANNELS_API->currentReocrdState();
@@ -110,25 +152,29 @@ void GoLivePannel::toggleRecord(bool isStart)
 
 void GoLivePannel::updateRecordButton(int state)
 {
+	QString msg = QString(" try to update RECButton ,now state is %1 ").arg(RecordStatesMap[state]);
+	PRE_LOG_MSG_STEP(QString(msg), g_recordStep, INFO);
 	switch (state) {
 	case RecordStarted:
 		if (!ui->Record->isChecked()) {
 			QSignalBlocker blocker(ui->Record);
 			ui->Record->setChecked(true);
 		}
-		ui->Record->setText(CHANNELS_TR(STOP));
+		ui->Record->setText(QTStr("Channels.STOP"));
 		ui->Record->setDisabled(false);
+		ui->Record->setToolTip(QTStr("Channels.stopRec.tooltip"));
 		break;
 	case RecordReady:
 	case CanRecord:
-	case RecordStopped:
+	case RecordStopped: {
 		if (ui->Record->isChecked()) {
 			QSignalBlocker blocker(ui->Record);
 			ui->Record->setChecked(false);
 		}
-		ui->Record->setText(CHANNELS_TR(REC));
+		ui->Record->setText(QTStr("Channels.REC"));
 		ui->Record->setDisabled(false);
-		break;
+		setRecTooltip();
+	} break;
 
 	case RecordStarting:
 	case RecordStopping:
@@ -163,6 +209,10 @@ bool GoLivePannel::confirmToContinue() const
 	//only check naver shopping
 	auto selected = PLSCHANNELS_API->getCurrentSelectedPlatformChannels(NAVER_SHOPPING_LIVE, NoType);
 	if (selected.isEmpty()) {
+		return true;
+	}
+
+	if (PLS_PLATFORM_API->getLiveEndType() == EndLiveType::MQTT_END_LIVE) {
 		return true;
 	}
 	auto islastMuted = pls_mixer_is_all_mute();
@@ -208,15 +258,51 @@ void GoLivePannel::toggleBroadcast(bool toStart)
 		return;
 	}
 
+	bool bSame = PLSBasic::instance()->checkRecEncoder();
+	if (bSame && !ui->Record->isEnabled()) {
+		int state = PLSCHANNELS_API->currentReocrdState();
+		PLS_INFO("GoLivePannel", "current Reocrd is %d", state);
+		if (state == RecordStarting) {
+			PLSAlertView::warning(this, tr("Alert.Title"), tr("StartingRec.RECBtnIsBusy.Text"));
+		} else if (state == RecordStopGo || state == RecordStopping) {
+			PLSAlertView::warning(this, tr("Alert.Title"), tr("EndingRec.RECBtnIsBusy.Text"));
+		}
+
+		ui->GoLiveShift->setDisabled(false);
+		QSignalBlocker blocker(ui->GoLiveShift);
+		auto bCheck = ui->GoLiveShift->isChecked();
+		ui->GoLiveShift->setChecked(!bCheck);
+		holdOnAll(false);
+		return;
+	}
+
 	HolderReleaser holder(&GoLivePannel::setEnteredGolive, this);
 
 	int state = PLSCHANNELS_API->currentBroadcastState();
+
+	if (state == StreamStopping) {
+		auto ret = PLSAlertView::question(pls_get_main_view(), CHANNELS_TR(Confirm), CHANNELS_TR(NeedForceStop),
+						  {{PLSAlertView::Button::Yes, QObject::tr("OK")}, {PLSAlertView::Button::Cancel, QObject::tr("Cancel")}}, PLSAlertView::Button::Cancel);
+		ui->GoLiveShift->setDisabled(false);
+
+		if (ret == PLSAlertView::Button::Yes && PLSCHANNELS_API->currentBroadcastState() == StreamStopping) {
+			PLSBasic::instance()->ForceStopStreaming();
+			QSignalBlocker blocker(ui->GoLiveShift);
+			auto bCheck = ui->GoLiveShift->isChecked();
+			ui->GoLiveShift->setChecked(!bCheck);
+		}
+		return;
+	}
+
 	// to end
 	if (!toStart && !confirmToContinue()) {
+		//issue3760 navershopping click the finsh button to end end,wait 10s,BroadcastState maybe modify when mqtt force end
+		state = PLSCHANNELS_API->currentBroadcastState();
 		updateGoliveButton(state);
 		holdOnAll(false);
 		return;
 	}
+	state = PLSCHANNELS_API->currentBroadcastState();
 
 	auto ignoreChange = [&]() {
 		PRE_LOG_MSG_STEP("ignore toggle broadcasting,state is going to be ", g_LiveStep, INFO)
@@ -260,6 +346,7 @@ void GoLivePannel::updateGoliveButton(int state)
 		}
 		ui->GoLiveShift->setText(PLSCHANNELS_API->isRehearsaling() ? finisheRehearsalText : finishLiveText);
 		ui->GoLiveShift->setDisabled(false);
+		emit PLSMainView::instance()->onGolivePending(false);
 		break;
 	case ReadyState:
 		if (ui->GoLiveShift->isChecked()) {
@@ -268,17 +355,37 @@ void GoLivePannel::updateGoliveButton(int state)
 		}
 		ui->GoLiveShift->setText(goliveText);
 		ui->GoLiveShift->setDisabled(false);
-
+		emit PLSMainView::instance()->onGolivePending(false);
 		break;
 	case BroadcastGo:
 	case CanBroadcastState:
 	case StreamStarting:
 	case StopBroadcastGo:
 	case CanBroadcastStop:
-	case StreamStopping:
 		ui->GoLiveShift->setDisabled(true);
+		emit PLSMainView::instance()->onGolivePending(true);
+		break;
+	case StreamStopping:
+		ui->GoLiveShift->setDisabled(false);
+		emit PLSMainView::instance()->onGolivePending(true);
 		break;
 	default:
 		break;
+	}
+}
+
+void GoLivePannel::setRecTooltip()
+{
+	pls_check_app_exiting();
+	int state = PLSCHANNELS_API->currentReocrdState();
+	if (state == RecordStarted) {
+		ui->Record->setToolTip(QTStr("Channels.stopRec.tooltip"));
+	} else {
+		bool bSame = PLSBasic::instance()->checkRecEncoder();
+		if (bSame) {
+			ui->Record->setToolTip(QTStr("Channels.pauseRec.tooltip"));
+		} else {
+			ui->Record->setToolTip("");
+		}
 	}
 }

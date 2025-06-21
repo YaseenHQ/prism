@@ -2,6 +2,7 @@
 #define CHANNELDATAHANDLER_H
 
 #include <qjsonobject.h>
+#include <QNetworkReply>
 #include <QObject>
 #include <QSharedPointer>
 #include <QString>
@@ -47,11 +48,7 @@ public:
 	virtual void resetWhenRefresh();
 
 	//login
-	virtual void beginLogin();
-	//call api before login
-	virtual void prelogin();
-	//actual login with webpage
-	virtual void loginWithWebPage();
+	virtual void loginWithWebPage(const QString &cmdStr);
 
 	virtual void showLiveInfo(const QString & /*uuid*/){};
 
@@ -63,7 +60,7 @@ public:
 	virtual void downloadImage();
 
 signals:
-	void preloginFinished();
+	void preloginFinished(const QString &cmdStr);
 	void loginFinished();
 	void updateFinished();
 
@@ -117,7 +114,7 @@ protected:
 	void finishUpdateBasicInfo(const QVariantMap &jsonMap);
 	bool getheaderImage();
 
-	void handleError(int statusCode);
+	void handleError(int code, QByteArray data, QNetworkReply::NetworkError error, const QString &logFrom);
 	void resetWhenRefresh() override;
 
 private:

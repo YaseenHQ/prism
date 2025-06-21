@@ -1,5 +1,5 @@
 /******************************************************************************
-    Copyright (C) 2020 by Hugh Bailey <obs.jim@gmail.com>
+    Copyright (C) 2023 by Lain Bailey <lain@obsproject.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -18,6 +18,8 @@
 #include "window-basic-main.hpp"
 #include "screenshot-obj.hpp"
 #include "qt-wrappers.hpp"
+#include "pls/pls-dual-output.h"
+#include "PLSSceneitemMapManager.h"
 
 #ifdef _WIN32
 #include <wincodec.h>
@@ -48,10 +50,12 @@ ScreenshotObj::~ScreenshotObj()
 		th.join();
 
 		if (showtips && cx && cy) {
-			pls_toast_message(
-				pls_toast_info_type::PLS_TOAST_NOTICE,
-				QTStr("Basic.StatusBar.ScreenshotSavedTo")
-					.arg(QT_UTF8(path.c_str())));
+			if (!path.empty()) {
+				pls_toast_message(
+					pls_toast_info_type::PLS_TOAST_NOTICE,
+					QTStr("Basic.StatusBar.ScreenshotSavedTo")
+						.arg(QT_UTF8(path.c_str())));
+			}
 			OBSBasic *main = OBSBasic::Get();
 #if 0
 			main->ShowStatusBarMessage(
@@ -73,11 +77,20 @@ void ScreenshotObj::Screenshot()
 	OBSSource source = OBSGetStrongRef(weakSource);
 
 	if (source) {
-		cx = obs_source_get_base_width(source);
-		cy = obs_source_get_base_height(source);
+		if (isVerticalPreview) {
+			cx = pls_source_get_vertical_width(source);
+			cy = pls_source_get_vertical_height(source);
+		} else {
+			cx = obs_source_get_width(source);
+			cy = obs_source_get_height(source);
+		}
 	} else {
 		obs_video_info ovi;
-		obs_get_video_info(&ovi);
+		if (isVerticalPreview) {
+			pls_get_vertical_video_info(&ovi);
+		} else {
+			obs_get_video_info(&ovi);
+		}
 		cx = ovi.base_width;
 		cy = ovi.base_height;
 	}
@@ -117,10 +130,13 @@ void ScreenshotObj::Screenshot()
 
 		if (source) {
 			obs_source_inc_showing(source);
-			obs_source_video_render(source);
+			isVerticalPreview
+				? pls_source_video_render_vertical(source)
+				: pls_source_video_render_landscape(source);
 			obs_source_dec_showing(source);
 		} else {
-			obs_render_main_texture();
+			isVerticalPreview ? pls_render_vertical_main_texture()
+					  : obs_render_main_texture();
 		}
 
 		gs_blend_state_pop();
@@ -347,7 +363,7 @@ static void ScreenshotTick(void *param, float)
 	data->stage++;
 }
 
-void OBSBasic::Screenshot(OBSSource source)
+void OBSBasic::Screenshot(OBSSource source, bool isVerticalPreview)
 {
 	if (!!screenshotData) {
 		blog(LOG_WARNING, "Cannot take new screenshot, "
@@ -356,12 +372,20 @@ void OBSBasic::Screenshot(OBSSource source)
 	}
 
 	screenshotData = new ScreenshotObj(source);
-	qobject_cast<ScreenshotObj *>(screenshotData)->Start();
+	auto obj = qobject_cast<ScreenshotObj *>(screenshotData);
+	obj->isVerticalPreview = isVerticalPreview;
+	obj->Start();
 }
 
 void OBSBasic::ScreenshotSelectedSource()
 {
 	OBSSceneItem item = GetCurrentSceneItem();
+	auto isVerticalPreview = getIsVerticalPreviewFromAction();
+	if (isVerticalPreview) {
+		item = PLSSceneitemMapMgrInstance->getVerticalSelectedSceneitem(
+			item);
+	}
+
 	if (item) {
 		Screenshot(obs_sceneitem_get_source(item));
 	} else {
@@ -377,5 +401,5 @@ void OBSBasic::ScreenshotProgram()
 
 void OBSBasic::ScreenshotScene()
 {
-	Screenshot(GetCurrentSceneSource());
+	Screenshot(GetCurrentSceneSource(), getIsVerticalPreviewFromAction());
 }

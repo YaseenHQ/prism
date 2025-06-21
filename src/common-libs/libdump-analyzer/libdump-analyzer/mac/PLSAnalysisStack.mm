@@ -8,11 +8,37 @@
 #import <KSJSONCodecObjC.h>
 
 // MARK: Private
-
-static void get_module_names(NSDictionary *report, std::set<std::string> &module_names);
-static void get_dump_data(NSDictionary *report, std::string &dump_data);
-static NSArray<NSDictionary *> * crash_thread_backtrace(NSDictionary *report);
-static void get_report_location(NSDictionary *report, std::string &location);
+static NSArray<NSDictionary *> * crash_thread_backtrace(NSDictionary *report) {
+	NSDictionary *crash = report[@"crash"];
+	if (!crash) {
+		return @[];
+	}
+	
+	NSArray<NSDictionary *> *threads = crash[@"threads"];
+	if (!threads || threads.count == 0) {
+		return @[];
+	}
+	
+	__block NSDictionary *crashedThread = threads.firstObject;
+	
+	NSString *type = crash[@"error"][@"type"];
+	if (![type isEqualToString:@"user"]) {
+		[threads enumerateObjectsUsingBlock:^(NSDictionary * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+			id crashed = obj[@"crashed"];
+			if (crashed && [crashed boolValue]) {
+				crashedThread = obj;
+				*stop = YES;
+			}
+		}];
+	}
+	
+	if (!crashedThread) {
+		return @[];
+	}
+	
+	NSArray<NSDictionary *> *backtrace = crashedThread[@"backtrace"][@"contents"];
+	return backtrace;
+}
 
 static NSString *getBundleName() {
     NSString *bundleName = [[[NSBundle mainBundle] infoDictionary] objectForKey:@"CFBundleName"];
@@ -22,7 +48,7 @@ static NSString *getBundleName() {
     return bundleName;
 }
 
-static NSString *getBasePath(std::string process_name) {
+static NSString *getBasePath(ProcessInfo const &info) {
     NSArray *directories = NSSearchPathForDirectoriesInDomains(NSCachesDirectory,
                                                                NSUserDomainMask,
                                                                YES);
@@ -35,138 +61,206 @@ static NSString *getBasePath(std::string process_name) {
         NSLog(@"Could not locate cache directory path.");
         return nil;
     }
-    NSString *pathEnd = process_name.empty() ? getBundleName() : [NSString stringWithUTF8String:process_name.c_str()];
-    return [cachePath stringByAppendingPathComponent:pathEnd];
+    NSString *processPath = info.process_name.empty() ? getBundleName() : [NSString stringWithUTF8String:info.process_name.c_str()];
+	NSString *subsessionPath = [processPath stringByAppendingPathComponent:[NSString stringWithUTF8String:info.prism_sub_session.c_str()]];
+	NSString *finalPath = [subsessionPath stringByAppendingPathComponent:[NSString stringWithUTF8String:info.pid.c_str()]];
+	
+	return [cachePath stringByAppendingPathComponent:finalPath];
 }
 
 static void get_latest_report(ProcessInfo const *info, NSDictionary **report) {
     const ProcessInfo &localInfo = *info;
 
-    NSString *reportsPath = [getBasePath(localInfo.process_name) stringByAppendingPathComponent:@"Reports"];
+    NSString *reportsPath = [getBasePath(localInfo) stringByAppendingPathComponent:@"Reports"];
     
     NSError *error = nil;
     NSFileManager *fileManager = [NSFileManager defaultManager];
         
     NSArray<NSString *> *logPaths = [fileManager contentsOfDirectoryAtPath:reportsPath error:&error];
+	
+	__block NSDictionary *selectedReport = nil;
     
     if (error == nil) {
-        NSArray *sortedFiles = [logPaths sortedArrayUsingComparator:^NSComparisonResult(id obj1, id obj2) {
+        NSArray<NSString *> *sortedFiles = [logPaths sortedArrayUsingComparator:^NSComparisonResult(id obj1, id obj2) {
             NSString *file1 = [reportsPath stringByAppendingPathComponent:obj1];
             NSString *file2 = [reportsPath stringByAppendingPathComponent:obj2];
             NSDictionary *file1Attributes = [fileManager attributesOfItemAtPath:file1 error:nil];
             NSDictionary *file2Attributes = [fileManager attributesOfItemAtPath:file2 error:nil];
             return [[file2Attributes objectForKey:NSFileCreationDate] compare:[file1Attributes objectForKey:NSFileCreationDate]];
         }];
-        if (sortedFiles.count > 0) {
-            NSString *newestFilePath = [reportsPath stringByAppendingPathComponent:[sortedFiles objectAtIndex:0]];
-            
-            NSData *jsonData = [fileManager contentsAtPath:newestFilePath];
-            NSError *decodeError = nil;
-            int decodeOption = KSJSONDecodeOptionIgnoreAllNulls | KSJSONDecodeOptionKeepPartialObject;
-            NSDictionary *decodedReport = [KSJSONCodec decode:jsonData
-                                               options:(KSJSONDecodeOption)decodeOption
-                                                 error:&decodeError];
-            
-            if (decodeError == nil) {
-                *report = decodedReport;
-            }
-        }
+		
+		[sortedFiles enumerateObjectsUsingBlock:^(NSString * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+			NSString *newestFilePath = [reportsPath stringByAppendingPathComponent:obj];
+			
+			NSData *jsonData = [fileManager contentsAtPath:newestFilePath];
+			NSError *decodeError = nil;
+			int decodeOption = KSJSONDecodeOptionIgnoreAllNulls | KSJSONDecodeOptionKeepPartialObject;
+			NSDictionary *decodedReport = [KSJSONCodec decode:jsonData
+													  options:(KSJSONDecodeOption)decodeOption
+														error:&decodeError];
+			
+			if (decodeError == nil) {
+				NSDictionary *crash = decodedReport[@"crash"];
+				if (!crash) {
+					return;
+				}
+				
+				NSString *type = crash[@"error"][@"type"];
+				// type == user means it's a block dump, so we skip and check next one.
+				if ([type isEqualToString:@"user"]) {
+					return;
+				}
+				selectedReport = decodedReport;
+				*stop = YES;
+			}
+		}];
     }
+	
+	*report = selectedReport;
+}
+
+static NSString * find_binary_image_path(NSDictionary *report, NSString *objectName) {
+	NSArray<NSDictionary *> *images = report[@"binary_images"] ?: @[];
+	__block NSString *image_path;
+	[images enumerateObjectsUsingBlock:^(NSDictionary * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+		NSString *path = obj[@"name"] ?: @"";
+		if ([path containsString:objectName]) {
+			image_path = path;
+			*stop = YES;
+		}
+	}];
+	return image_path;
+}
+
+static void get_crash_stack_hash(std::string processName, NSDictionary *report, std::string &stack_hash) {
+	NSArray<NSDictionary *> *backtrace = crash_thread_backtrace(report);
+	
+	NSMutableString *modules = [NSMutableString new];
+	
+	[backtrace enumerateObjectsUsingBlock:^(NSDictionary * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+		NSString *objectName = obj[@"object_name"];
+		if (objectName) {
+			NSString *objectPath = find_binary_image_path(report, objectName);
+			if (objectPath && [objectPath containsString:[NSString stringWithUTF8String:processName.c_str()]]) {
+				NSString *symbolName = obj[@"symbol_name"];
+				[modules appendString:[NSString stringWithFormat:@"%@ %@\n", objectName, symbolName]];
+			}
+		}
+	}];
+	
+	stack_hash = [NSString stringWithString:modules].UTF8String;
 }
 
 // MARK: Public
 
-void mac_install_crash_reporter(const std::string &process_name) {
+static void get_dump_data(NSDictionary *report, std::string &dump_data) {
+	KSCrashReportFilterAppleFmt *filter = [KSCrashReportFilterAppleFmt filterWithReportStyle:KSAppleReportStyleSymbolicated];
+	[filter filterReports:@[report] onCompletion:^(NSArray *filteredReports, BOOL completed, NSError *error) {
+		if (filteredReports.count > 0) {
+			NSString *dumpData = filteredReports.firstObject;
+			dump_data = dumpData.UTF8String;
+		}
+	}];
+}
+
+static void get_module_names(NSDictionary *report, std::set<std::map<std::string, std::string>> &module_names) {
+	NSArray<NSDictionary *> *binaryImages = report[@"binary_images"];
+	NSArray<NSDictionary *> *backtrace = crash_thread_backtrace(report);
+	[backtrace enumerateObjectsUsingBlock:^(NSDictionary * _Nonnull stack, NSUInteger idx, BOOL * _Nonnull stop) {
+		NSString *symbolName = stack[@"symbol_name"];
+		if (!symbolName) {
+			return;
+		}
+		NSNumber *symbolAddress = stack[@"symbol_addr"];
+		NSString *objectName = stack[@"object_name"];
+		NSNumber *objectAddress = stack[@"object_addr"];
+		std::map<std::string, std::string> module_info;
+		module_info["symbol_name"] = symbolName.UTF8String;
+		module_info["symbol_addr"] = [NSString stringWithFormat:@"%@", symbolAddress].UTF8String;
+		module_info["object_name"] = objectName.UTF8String;
+		module_info["object_addr"] = [NSString stringWithFormat:@"%@", objectAddress].UTF8String;
+		
+		__block NSString *objectPath = nil;
+		[binaryImages enumerateObjectsUsingBlock:^(NSDictionary * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+			if ([obj[@"image_addr"] isEqualToNumber:objectAddress]) {
+				objectPath = obj[@"name"];
+				*stop = YES;
+			}
+		}];
+		
+		if (objectPath) {
+			module_info["object_path"] = objectPath.UTF8String;
+		}
+		
+		module_names.insert(module_info);
+	}];
+}
+
+static void get_report_location(std::string processName, NSDictionary *report, std::string &location) {
+	NSArray<NSDictionary *> *backtrace = crash_thread_backtrace(report);
+	if (backtrace && backtrace.count > 0) {
+		__block NSDictionary *stack = nil;
+		
+		[backtrace enumerateObjectsUsingBlock:^(NSDictionary * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+			NSString *objectName = obj[@"object_name"];
+			if (!objectName) {
+				return;
+			}
+			NSString *objectPath = find_binary_image_path(report, objectName);
+			if (objectPath && [objectPath containsString:[NSString stringWithUTF8String:processName.c_str()]]) {
+				stack = obj;
+				*stop = YES;
+			}
+		}];
+		if (!stack) {
+			stack = backtrace.firstObject;
+		}
+		
+		NSString *symbolName = stack[@"symbol_name"];
+		NSString *symbolAddress = stack[@"symbol_addr"];
+		NSString *objectName = stack[@"object_name"];
+		NSString *objectAddress = stack[@"object_addr"];
+		NSString *locationName = [NSString stringWithFormat:@"%@ +%@ %@ +%@", objectName, objectAddress, symbolName, symbolAddress];
+		
+		location = locationName.UTF8String;
+	}
+}
+
+void mac_install_crash_reporter(ProcessInfo const &info) {
     KSCrash *reporter = [KSCrash sharedInstance];
-    reporter.basePath = getBasePath(process_name);
+	reporter.basePath = getBasePath(info);
+	[reporter enableSwapOfCxaThrow];
     [reporter install];
 }
 
-void mac_get_latest_dump_data_location(ProcessInfo const &info, std::string &dump_data, std::string &location) {
+void mac_get_latest_dump_data(ProcessInfo const &info, std::string &dump_data, std::string &location, std::string &stack_hash, std::set<std::map<std::string, std::string>> &module_names) {
     if (info.dump_file.empty() == false) {
         NSString *path = [NSString stringWithUTF8String:info.dump_file.c_str()];
         NSString *dumpData = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
-        dump_data = dumpData.UTF8String;
+		
+		NSError *decodeError = nil;
+		int decodeOption = KSJSONDecodeOptionIgnoreAllNulls | KSJSONDecodeOptionKeepPartialObject;
+		NSDictionary *decodedReport = [KSJSONCodec decode:[dumpData dataUsingEncoding:NSUTF8StringEncoding]
+												  options:(KSJSONDecodeOption)decodeOption
+													error:&decodeError];
+		if (decodedReport) {
+			get_report_location(info.process_name, decodedReport, location);
+			get_dump_data(decodedReport, dump_data);
+			
+		}
         return;
     }
     NSDictionary *report = nil;
-    get_latest_report(&info, &report);
+	get_latest_report(&info, &report);
     
     if (!report) {
         return;
     }
     
-    get_report_location(report, location);
+	get_report_location(info.process_name, report, location);
+	get_crash_stack_hash(info.process_name, report, stack_hash);
     get_dump_data(report, dump_data);
-}
-
-void mac_get_latest_dump_data_module_names(ProcessInfo const &info, std::string &dump_data, std::set<std::string> &module_names) {
-    NSDictionary *report = nil;
-    get_latest_report(&info, &report);
-    
-    if (!report) {
-        return;
-    }
-    
-    get_dump_data(report, dump_data);
-    get_module_names(report, module_names);
-}
-
-static void get_dump_data(NSDictionary *report, std::string &dump_data) {
-    KSCrashReportFilterAppleFmt *filter = [KSCrashReportFilterAppleFmt filterWithReportStyle:KSAppleReportStyleSymbolicated];
-    [filter filterReports:@[report] onCompletion:^(NSArray *filteredReports, BOOL completed, NSError *error) {
-        if (filteredReports.count > 0) {
-            NSString *dumpData = filteredReports.firstObject;
-            dump_data = dumpData.UTF8String;
-        }
-    }];
-}
-
-static void get_module_names(NSDictionary *report, std::set<std::string> &module_names) {
-    NSArray<NSDictionary *> *backtrace = crash_thread_backtrace(report);
-    [backtrace enumerateObjectsUsingBlock:^(NSDictionary * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
-        NSString *objectName = obj[@"object_name"];
-        if (objectName) {
-            module_names.insert(objectName.UTF8String);
-        }
-    }];
-}
-
-static void get_report_location(NSDictionary *report, std::string &location) {
-    NSArray<NSDictionary *> *backtrace = crash_thread_backtrace(report);
-    if (backtrace && backtrace.count > 0) {
-        NSDictionary *stack = backtrace.firstObject;
-        NSString *symbolName = stack[@"symbol_name"];
-        if (symbolName) {
-            location = symbolName.UTF8String;
-        }
-    }
-}
-
-static NSArray<NSDictionary *> * crash_thread_backtrace(NSDictionary *report) {
-    NSDictionary *crash = report[@"crash"];
-    if (!crash) {
-        return @[];
-    }
-    NSArray<NSDictionary *> *threads = crash[@"threads"];
-    if (!threads) {
-        return @[];
-    }
-    __block NSDictionary *crashedThread = nil;
-    [threads enumerateObjectsUsingBlock:^(NSDictionary * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
-        id crashed = obj[@"crashed"];
-        if (crashed && [crashed boolValue]) {
-            crashedThread = obj;
-            *stop = YES;
-        }
-    }];
-    
-    if (!crashedThread) {
-        return @[];
-    }
-    
-    NSArray<NSDictionary *> *backtrace = crashedThread[@"backtrace"][@"contents"];
-    return backtrace;
+	get_module_names(report, module_names);
 }
 
 bool mac_send_data(std::string post_body) {
@@ -213,7 +307,8 @@ bool mac_remove_crash_logs(ProcessInfo const &info) {
     }
     removed = error == nil;
     
-    NSString *path = [getBasePath(info.process_name) stringByAppendingPathComponent:@"Reports"];
+    NSString *path = [getBasePath(info) stringByAppendingPathComponent:@"Reports"];
+	
     [[NSFileManager defaultManager] removeItemAtPath:path error:&error];
     
     removed = error == nil;

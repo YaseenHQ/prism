@@ -8,6 +8,7 @@
 #include "../channels/ChannelsDataApi/PLSChannelDataHandler.h"
 #include "PLSNaverShoppingLIVEAPI.h"
 #include "PLSScheduleComboxMenu.h"
+#include "PLSErrorHandler.h"
 #include <QReadWriteLock>
 
 constexpr auto MODULE_PLATFORM_NAVER_SHOPPING_LIVE = "Platform/NaverShoppingLIVE";
@@ -43,7 +44,8 @@ public:
 	bool onMQTTMessage(PLSPlatformMqttTopic top, const QJsonObject &jsonObject) override;
 
 	void getUserInfo(const QString channelName, const QVariantMap srcInfo, const UpdateCallback &finishedCall, bool isFirstUpdate);
-	QVariantMap getUserInfoFinished(const QVariantMap &srcInfo, PLSAPINaverShoppingType apiType, const PLSNaverShoppingLIVEAPI::NaverShoppingUserInfo &userInfo, const QString &channelName);
+	QVariantMap getUserInfoFinished(const QVariantMap &srcInfo, PLSAPINaverShoppingType apiType, const PLSNaverShoppingLIVEAPI::NaverShoppingUserInfo &userInfo, const QString &channelName,
+					const QByteArray &data, int statusCode, QNetworkReply::NetworkError error);
 	QString getSubChannelId() const;
 	QString getSubChannelName() const;
 	bool isRehearsal() const;
@@ -63,13 +65,13 @@ public:
 	void setPrepareInfo(const PLSNaverShoppingLIVEAPI::NaverShoppingPrepareLiveInfo &prepareInfo);
 	void saveCurrentScheduleRehearsalPrepareInfo();
 	void setStreamUrlAndStreamKey();
-	void createLiving(const std::function<void(PLSAPINaverShoppingType apiType, const PLSNaverShoppingLIVEAPI::NaverShoppingLivingInfo &livingInfo)> &callback, const QObject *receiver,
-			  const PLSNaverShoppingLIVEAPI::ReceiverIsValid &receiverIsValid = nullptr);
+	void createLiving(const std::function<void(PLSAPINaverShoppingType apiType, const PLSNaverShoppingLIVEAPI::NaverShoppingLivingInfo &livingInfo, const QByteArray &data)> &callback,
+			  const QObject *receiver, const PLSNaverShoppingLIVEAPI::ReceiverIsValid &receiverIsValid = nullptr);
 	void getLivingInfo(bool livePolling, const std::function<void(PLSAPINaverShoppingType apiType, const PLSNaverShoppingLIVEAPI::NaverShoppingLivingInfo &livingInfo)> &callback,
 			   const QObject *receiver, const PLSNaverShoppingLIVEAPI::ReceiverIsValid &receiverIsValid = nullptr);
-	void updateLivingRequest(const std::function<void(PLSAPINaverShoppingType apiType)> &callback, const QString &liveId, const QObject *receiver,
+	void updateLivingRequest(const std::function<void(PLSAPINaverShoppingType apiType, const QByteArray &data)> &callback, const QString &liveId, const QObject *receiver,
 				 const PLSNaverShoppingLIVEAPI::ReceiverIsValid &receiverIsValid = nullptr);
-	void updateScheduleRequest(const std::function<void(PLSAPINaverShoppingType apiType)> &callback, const QString &scheduleId, const QObject *receiver,
+	void updateScheduleRequest(const std::function<void(PLSAPINaverShoppingType apiType, const QByteArray &data)> &callback, const QString &scheduleId, const QObject *receiver,
 				   const PLSNaverShoppingLIVEAPI::ReceiverIsValid &receiverIsValid = nullptr);
 	void downloadScheduleListImage(const PLSNaverShoppingLIVEAPI::GetScheduleListCallback &callback, int page, int totalCount, const QObject *receiver,
 				       const PLSNaverShoppingLIVEAPI::ReceiverIsValid &receiverIsValid = nullptr);
@@ -77,7 +79,7 @@ public:
 			     const PLSNaverShoppingLIVEAPI::ReceiverIsValid &receiverIsValid = nullptr);
 	void getSchduleListRequestSuccess(const uint64_t &flag, PLSAPINaverShoppingType apiType, const PLSNaverShoppingLIVEAPI::GetScheduleListCallback &callback, int page, int totalCount,
 					  const QList<PLSNaverShoppingLIVEAPI::ScheduleInfo> &scheduleList, int currentPage, const QString &type, QObject *receiver,
-					  const PLSNaverShoppingLIVEAPI::ReceiverIsValid &receiverIsValid);
+					  const PLSNaverShoppingLIVEAPI::ReceiverIsValid &receiverIsValid, const QByteArray &data);
 	bool isClickConfirmUseTerm() const;
 	void loginFinishedPopupAlert();
 	bool checkNaverShoppingTermOfAgree(bool isGolive = false) const;
@@ -93,10 +95,9 @@ public:
 	void addScaleImageThread(const QString &originPath);
 	bool isAddScaleImageThread(const QString &originPath) const;
 	QString getScaleImagePath(const QString &originPath) const;
-	void handleCommonApiType(PLSAPINaverShoppingType apiType, const ApiPropertyMap &apiPropertyMap = ApiPropertyMap());
-	void handleCommonAlert(PLSAPINaverShoppingType apiType, const QString &content, const ApiPropertyMap &apiPropertyMap, bool errorMessage = false) const;
-	void handleNetworkError(PLSAPINaverShoppingType apiType, const ApiPropertyMap &apiPropertyMap);
-	void handleInvalidToken(PLSAPINaverShoppingType apiType, const ApiPropertyMap &apiPropertyMap);
+	void handleCommonApiType(PLSErrorHandler::RetData retData, PLSAPINaverShoppingType apiType, PLSAPINaverShoppingUrlType urlType = PLSAPINaverShoppingUrlType::PLSNone,
+				 ApiPropertyMap apiPropertyMap = ApiPropertyMap());
+	void handleInvalidToken(PLSErrorHandler::RetData retData, PLSAPINaverShoppingType apiType, const ApiPropertyMap &apiPropertyMap);
 	const QString &getSoftwareUUid() const;
 	void liveNoticeScheduleListSuccess(const QList<PLSNaverShoppingLIVEAPI::ScheduleInfo> &scheduleList);
 	bool isHighResolutionSlvByPrepareInfo() const;
@@ -137,8 +138,9 @@ private:
 	QMap<QString, QString> scaleImagePixmapCache;
 	QReadWriteLock downloadImagePixmapCacheRWLock{QReadWriteLock::Recursive};
 	QStringList m_imagePaths;
-	bool networkErrorPopupShowing{false};
+	//bool networkErrorPopupShowing{false};
 	bool isScheLiveNoticeShown{false};
+	bool invalidTokenPopupShowing{false};
 	QTimer *checkStatusTimer = nullptr;
 	bool m_callCreateLiveSuccess = false;
 	bool m_naverShoppingTermAndNotesChecked = false;

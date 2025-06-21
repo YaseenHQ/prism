@@ -15,6 +15,14 @@
 #include "libui.h"
 #include "PLSBasic.h"
 #include "PLSPlatformApi.h"
+#include "pls/pls-obs-api.h"
+#include "login-user-info.hpp"
+#include "B2BResolutionGuideItem.h"
+#include "pls-common-define.hpp"
+#include "frontend-api.h"
+#include "PLSServerStreamHandler.hpp"
+#include "pls/pls-dual-output.h"
+#include "PLSLoginDataHandler.h"
 
 const char ResolutionGroup[] = "resolution";
 const char ResolutionGeo[] = "resolutionGeo";
@@ -34,6 +42,13 @@ ResolutionGuidePage::ResolutionGuidePage(QWidget *parent) : PLSDialogView(parent
 			this->close();
 		},
 		Qt::QueuedConnection);
+
+	QString userServiceName = PLSLoginUserInfo::getInstance()->getNCPPlatformServiceName();
+	if (!userServiceName.isEmpty()) {
+		ui->B2BServerName->setText(userServiceName);
+		mB2BLogin = true;
+		ui->MainTitleLabel->setText(tr("ResolutionGuide.NCP.MainTitle"));
+	}
 
 	initialize();
 }
@@ -77,6 +92,142 @@ void ResolutionGuidePage::saveSettings() const
 	config_save(App()->GlobalConfig());
 }
 
+void ResolutionGuidePage::adjustLayout()
+{
+	if (mB2BLogin) {
+		auto buttonGroup = pls_new<QButtonGroup>();
+		buttonGroup->addButton(ui->B2BTab, 0);
+		buttonGroup->addButton(ui->otherTab, 1);
+		initializeB2BItem();
+	} else {
+		ui->TabFrame->hide();
+		ui->stackedWidget->setCurrentIndex(1);
+	}
+}
+
+bool ResolutionGuidePage::initializeB2BItem()
+{
+	ui->errorLabel->hide();
+	ui->B2BHeaderFrame->hide();
+	on_updateButton_clicked();
+	return true;
+}
+
+void ResolutionGuidePage::showB2BErrorLabel(const int errorCode)
+{
+	ui->B2BHeaderFrame->hide();
+	ui->B2BHeaderFrame->setContentsMargins(0, 0, 0, 0);
+	ui->B2BScrollLayout->setContentsMargins(0, 0, 0, 0);
+	ui->B2BScrollLayout->setAlignment(Qt::AlignCenter);
+	QString errText;
+	switch (errorCode) {
+	case EmptyList:
+	case ReturnFail:
+		errText = tr("ResolutionGuide.B2BEmptyList").arg(ui->B2BServerName->text());
+		break;
+	case ServiceDisable:
+		errText = tr("Ncb2b.Service.Disable.Status");
+		break;
+	default:
+		errText = tr("ResolutionGuide.B2BNetworkError");
+		break;
+	}
+	ui->errorLabel->setText(errText);
+	ui->errorLabel->show();
+}
+
+QString ResolutionGuidePage::getFilePath(const QString &fileName)
+{
+	auto path = pls_get_user_path(common::CONFIGS_LIBRARY_POLICY_PATH) + "../ncp_service_res/%1";
+	return path.arg(fileName);
+}
+
+void ResolutionGuidePage::handThumbnail()
+{
+	int thumbnailId = 0;
+	for (auto B2BResolutionPara : mB2BResolutionParaList) {
+		thumbnailId++;
+		auto thumbnailPath = getFilePath(QString("%1_%2.png").arg("streamingPresetThumbnail").arg(thumbnailId));
+		if (!QFile::exists(thumbnailPath)) {
+			continue;
+		}
+		QImage original;
+		original.load(thumbnailPath);
+		auto targetPixMap = PLSLoginDataHandler::instance()->scaleAndCrop(original, QSize(34, 34));
+		auto pixmap = QPixmap::fromImage(targetPixMap);
+		pls_shared_circle_mask_image(pixmap);
+		bool isSuccess = pixmap.save(B2BResolutionPara.streamingPresetThumbnail, "PNG");
+		PLS_INFO("ResolutionGuidePage", "save tagIcon is %s", isSuccess ? "true" : "false");
+	}
+	downloadThumbnailFinish();
+}
+
+QList<B2BResolutionPara> ResolutionGuidePage::parseServiceStreamingPreset(QJsonObject &object)
+{
+	auto servicesList = object.value("services").toArray();
+	if (servicesList.isEmpty()) {
+		PLS_ERROR("ResolutionGuidePage", "API return ServiceStreamingPreset is null");
+		return QList<B2BResolutionPara>{};
+	}
+	m_urlAndHowSaves.clear();
+	mB2BResolutionParaList.clear();
+	int thumbnailId = 0;
+	for (auto services : servicesList) {
+		thumbnailId++;
+		B2BResolutionPara para = {};
+		para.templateName = services.toObject().value("name").toString();
+		auto streamingPresetThumbnail = services.toObject().value("streamingPresetThumbnail").toString();
+		auto recommended = services.toObject().value("recommended").toObject();
+		int videoBitrate = recommended.value("videoBitrate").toInt();
+		para.bitrate = QString::number(videoBitrate) + " Kbps";
+		auto keyframeInterval = recommended.value("keyint").toInt();
+		para.keyframeInterval = QString::number(keyframeInterval);
+		auto resolution = recommended.value("resolution").toString();
+		auto fps = recommended.value("fps").toInt();
+		para.output_FPS = resolution + " / " + QString::number(fps) + "FPS";
+		auto thumbnailPath = getFilePath(QString("%1_%2.png").arg("streamingPresetThumbnail").arg(thumbnailId));
+		pls_remove_file(thumbnailPath);
+		auto downUrl = pls::rsm::UrlAndHowSave() //
+				       .keyPrefix(streamingPresetThumbnail)
+				       .url(streamingPresetThumbnail)
+				       .filePath(thumbnailPath);
+		m_urlAndHowSaves.push_back(downUrl);
+		auto corpPath = pls_get_user_path(common::CONFIGS_LIBRARY_POLICY_PATH) + "images/streamingPresetThumbnail_" + QString::number(thumbnailId) + ".png";
+		pls_remove_file(corpPath);
+
+		para.streamingPresetThumbnail = corpPath;
+		mB2BResolutionParaList.append(para);
+	}
+	auto cb = [this](const std::list<pls::rsm::DownloadResult> &results) {
+		for (auto &res : results) {
+			if (!res.isOk()) {
+				PLS_ERROR("ResolutionGuidePage", "downlaod banner failed,url is %s", res.m_urlAndHowSave.url().toString().toUtf8().constData());
+			}
+		}
+		handThumbnail();
+		m_downLoadRequestExisted = false;
+	};
+	m_downLoadRequestExisted = true;
+	pls::rsm::getDownloader()->download(m_urlAndHowSaves, this, cb);
+	return mB2BResolutionParaList;
+}
+
+void ResolutionGuidePage::UpdateB2BUI()
+{
+	ui->B2BHeaderFrame->show();
+	ui->B2BHeaderFrame->setContentsMargins(30, 30, 0, 0);
+	ui->errorLabel->hide();
+	ui->B2BScrollLayout->setContentsMargins(0, 0, 0, 30);
+	ui->B2BScrollLayout->setAlignment(Qt::AlignTop);
+	for (auto B2BResolutionPara : mB2BResolutionParaList) {
+		auto item = new B2BResolutionGuideItem(this);
+		ui->B2BScrollLayout->addWidget(item);
+		B2BResolutionPara.serviceName = ui->B2BServerName->text();
+		item->initialize(B2BResolutionPara, this);
+		connect(item, &B2BResolutionGuideItem::sigResolutionSelected, this, &ResolutionGuidePage::onUserSelectedResolution);
+	}
+}
+
 QString ResolutionGuidePage::getPreferResolutionStringOfPlatform(const QString &platform)
 {
 	auto isMatchPlatform = [&](const QVariant &resolutionData) {
@@ -85,7 +236,7 @@ QString ResolutionGuidePage::getPreferResolutionStringOfPlatform(const QString &
 			return false;
 		}
 
-		if (auto dataPlatform = varMap.value(ChannelData::g_platformName).toString(); platform.compare(dataPlatform, Qt::CaseInsensitive) != 0) {
+		if (auto dataPlatform = varMap.value(ChannelData::g_channelName).toString(); platform.compare(dataPlatform, Qt::CaseInsensitive) != 0) {
 			return false;
 		}
 
@@ -126,9 +277,7 @@ const QVariantList &ResolutionGuidePage::getResolutionsList()
 {
 	if (mResolutions.isEmpty()) {
 		mResolutions = PLSSyncServerManager::instance()->getResolutionsList();
-		if (mResolutions.isEmpty()) {
-			PLSGpopData::useDefaultValues(name2str(ResolutionGuide), mResolutions);
-		}
+		PLS_INFO("ResolutionGuidePage", "get resoltion item size is %d", mResolutions.size());
 	}
 
 	return mResolutions;
@@ -145,6 +294,7 @@ void ResolutionGuidePage::initialize()
 	}
 
 	connect(PLSPlatformApi::instance(), &PLSPlatformApi::outputStateChanged, this, &ResolutionGuidePage::updateItemsState);
+	adjustLayout();
 	updateItemsState();
 }
 
@@ -188,10 +338,18 @@ void ResolutionGuidePage::CannotTipObject::updateText()
 	if (outputState.testFlag(OutputState::StreamIsOn) || outputState.testFlag(OutputState::ReplayBufferIsOn) || outputState.testFlag(OutputState::RecordIsOn)) {
 
 		mText = tr("Resolution.InputIsActived");
+		return;
 	}
 	if (mText.isEmpty() && outputState.testFlag(OutputState::VirtualCamIsOn)) {
 
 		mText = tr("Resolution.VirtualCamIsActived");
+		return;
+	}
+
+	auto iCount = pls_get_active_output_count();
+	if (iCount > 0) {
+		auto name = pls_get_active_output_name(0);
+		mText = tr("Resolution.OtherPluginOutputActived").arg(name);
 	}
 }
 
@@ -229,8 +387,17 @@ void ResolutionGuidePage::updateItemsState()
 	if (!mainview->Active()) {
 		isCanChange = true;
 	}
+
+	if (obs_video_active()) {
+		isCanChange = false;
+	}
 	auto items = this->findChildren<ResolutionGuideItem *>();
 	for (auto item : items) {
+		item->setLinkEnanled(isCanChange);
+	}
+
+	auto B2Bitems = this->findChildren<B2BResolutionGuideItem *>();
+	for (auto item : B2Bitems) {
 		item->setLinkEnanled(isCanChange);
 	}
 
@@ -240,7 +407,10 @@ void ResolutionGuidePage::updateItemsState()
 
 	mCannotTip.updateUI();
 
-	QTimer::singleShot(500, this, [this]() { updateSpace(mCannotTip.mTip && mCannotTip.mTip->isVisibleTo(this)); });
+	QTimer::singleShot(500, this, [this]() {
+		PLS_INFO("ResolutionGuidePage", "singleShot updateItemsState");
+		updateSpace(mCannotTip.mTip && mCannotTip.mTip->isVisibleTo(this));
+	});
 }
 
 void ResolutionGuidePage::updateSpace(bool isAdd)
@@ -276,14 +446,15 @@ extern QString translatePlatformName(const QString &platformName);
 bool ResolutionGuidePage::isAcceptToChangeResolution(const QString &platform, const QString &resolution)
 {
 	auto questionContent = tr("ResolutionGuide.QuestionContent").arg(translatePlatformName(platform)).arg(resolution);
-	auto ret = PLSAlertView::question(nullptr, tr("Confirm"), questionContent, {{PLSAlertView::Button::Yes, tr("ResolutionGuide.ApplyNowBtn")}, {PLSAlertView::Button::Cancel, tr("Cancel")}});
+	auto ret = PLSAlertView::question(pls_get_main_view(), tr("Confirm"), questionContent,
+					  {{PLSAlertView::Button::Yes, tr("ResolutionGuide.ApplyNowBtn")}, {PLSAlertView::Button::Cancel, tr("Cancel")}});
 
 	return (ret == PLSAlertView::Button::Yes);
 }
 
 void ResolutionGuidePage::onUserSelectedResolution(const QString &txt)
 {
-	if (PLSCHANNELS_API->isLivingOrRecording()) {
+	if (PLSCHANNELS_API->isLivingOrRecording() || obs_video_active()) {
 		return;
 	}
 
@@ -291,16 +462,39 @@ void ResolutionGuidePage::onUserSelectedResolution(const QString &txt)
 	auto infoLst = txt.split(":");
 	const auto &platform = infoLst[0];
 	const auto &resolution = infoLst[1];
-
-	if (!isUserNeed(platform, resolution)) {
-		return;
+	bool bVerticalOutput = false;
+	if (pls_is_dual_output_on()) {
+		auto questionContent = tr("ResolutionGuide.QuestionContent").arg(translatePlatformName(platform)).arg(resolution);
+		auto ret = PLSAlertView::dualOutputApplyResolutionWarn(pls_get_main_view(), tr("Confirm"), questionContent,
+								       {{PLSAlertView::Button::Ok, tr("ResolutionGuide.ApplyNowBtn")}, {PLSAlertView::Button::Cancel, tr("Cancel")}},
+								       tr("ResolutionGuide.HorizontalApply"), tr("ResolutionGuide.VerticalApply"), bVerticalOutput);
+		if (ret == PLSAlertView::Button::Cancel) {
+			return;
+		}
+	} else {
+		if (!isUserNeed(platform, resolution)) {
+			return;
+		}
 	}
+
 	auto resolutionData = parserStringOfResolution(resolution);
 	if (platform.contains(NAVER_SHOPPING_LIVE, Qt::CaseInsensitive)) {
 		resolutionData.bitrate = 2500;
 	}
+	bool applyB2BItem = false;
+	if (mB2BLogin && infoLst.size() == 4) {
+		QString strBitrate = infoLst[2];
+		QRegularExpression re("^(\\d+)");
+		QRegularExpressionMatch match = re.match(strBitrate);
+		if (match.hasMatch()) {
+			QString numberStr = match.captured(1);
+			resolutionData.bitrate = numberStr.toInt();
+		}
+		resolutionData.keyframeInterval = infoLst[3].toInt();
+		applyB2BItem = true;
+	}
 
-	if (!setResolution(resolutionData, true)) {
+	if (!setResolution(resolutionData, true, bVerticalOutput)) {
 		emit sigSetResolutionFailed();
 		return;
 	}
@@ -309,7 +503,77 @@ void ResolutionGuidePage::onUserSelectedResolution(const QString &txt)
 		onUpdateResolution();
 	}
 
+	QVariantMap uploadVariantMap;
+	uploadVariantMap.insert("platform", platform);
+	if (applyB2BItem) {
+		uploadVariantMap.insert("platform", "NCP");
+		uploadVariantMap.insert("serviceName", ui->B2BServerName->text());
+		uploadVariantMap.insert("outputParam", platform);
+	}
+	pls_send_analog(AnalogType::ANALOG_PLATFORM_OUTPUTGUIDE, uploadVariantMap);
 	this->accept();
+}
+
+void ResolutionGuidePage::on_B2BTab_clicked()
+{
+	ui->stackedWidget->setCurrentIndex(0);
+	ui->B2BServerName->setProperty("slected", true);
+	pls_flush_style(ui->B2BServerName);
+}
+
+void ResolutionGuidePage::on_otherTab_clicked()
+{
+	ui->stackedWidget->setCurrentIndex(1);
+	ui->B2BServerName->setProperty("slected", false);
+	pls_flush_style(ui->B2BServerName);
+}
+
+void ResolutionGuidePage::on_updateButton_clicked()
+{
+	ui->B2BTab->click();
+
+	if (m_updateRequestExisted || m_downLoadRequestExisted) {
+		PLS_INFO("ResolutionGuidePage", "The refresh serviceStreamingPreset request already exists, avoid duplicate request.");
+		return;
+	}
+
+	QLayoutItem *item;
+	while ((item = ui->B2BScrollLayout->takeAt(1)) != nullptr) {
+		if (item->widget()) {
+			delete item->widget();
+		}
+		delete item;
+	}
+
+	if (!pls_get_network_state()) {
+		showB2BErrorLabel(NetworkError);
+		return;
+	}
+
+	auto okCallback = [this](const QJsonObject &data) {
+		QJsonObject serviceStreamingPreset = data.value("serviceStreamingPreset").toObject();
+		if (serviceStreamingPreset.isEmpty()) {
+			PLS_WARN("ResolutionGuidePage", "There was no ResolutionGuidePage field value was retrieved from the api.");
+			showB2BErrorLabel(EmptyList);
+		} else {
+			parseServiceStreamingPreset(serviceStreamingPreset);
+			UpdateB2BUI();
+			updateItemsState();
+		}
+		m_updateRequestExisted = false;
+	};
+
+	auto failCallback = [this](const QJsonObject &data, const PLSErrorHandler::RetData &retData) {
+		if (retData.prismCode == PLSErrorHandler::CHANNEL_NCP_B2B_1101_SERVICE_DISABLED) {
+			showB2BErrorLabel(ServiceDisable);
+		} else {
+			showB2BErrorLabel(ReturnFail);
+		}
+		m_updateRequestExisted = false;
+		PLS_WARN("ResolutionGuidePage", "get serviceStreamingPreset error code is %d", retData.prismCode);
+	};
+	m_updateRequestExisted = true;
+	PLSLoginDataHandler::instance()->getNCB2BServiceResFromRemote(okCallback, failCallback, this);
 }
 
 void ResolutionGuidePage::changeEvent(QEvent *e)
@@ -408,6 +672,7 @@ void ResolutionGuidePage::showIntroduceTip(QWidget *parent, const QString &platf
 	lay->setContentsMargins(0, 0, 0, 0);
 
 	auto deleteFrame = [frame]() {
+		PLS_INFO("ResolutionGuidePage", "frame delete");
 		frame->hide();
 		frame->deleteLater();
 	};
@@ -437,6 +702,10 @@ ResolutionGuidePage::OutputStates ResolutionGuidePage::getCurrentOutputState()
 		retState.setFlag(OutputState::StreamIsOn, PLSCHANNELS_API->isLiving());
 		retState.setFlag(OutputState::RecordIsOn, PLSCHANNELS_API->isRecording());
 		retState.setFlag(OutputState::VirtualCamIsOn, mainView->VirtualCamActive());
+		auto iCount = pls_get_active_output_count();
+		if (iCount > 0) {
+			retState.setFlag(OutputState::OtherPluginOutputIsOn, true);
+		}
 	}
 
 	return retState;
@@ -449,23 +718,24 @@ void ResolutionGuidePage::checkResolution(QWidget *parent, const QString &uuid)
 	}
 	auto platformInfo = PLSCHANNELS_API->getChannelInfo(uuid);
 	auto channelTyp = getInfo(platformInfo, ChannelData::g_data_type, ChannelData::ChannelDataType::ChannelType);
-	auto platformName = getInfo(platformInfo, ChannelData::g_platformName);
+	auto platformName = getInfo(platformInfo, ChannelData::g_channelName);
 	if (PLSCHANNELS_API->getChannelUserStatus(uuid) != ChannelData::Enabled && channelTyp == ChannelData::ChannelDataType::ChannelType) {
 		return;
 	}
 
-	checkResolutionForPlatform(parent, platformName, channelTyp);
+	auto dualOutput = getInfo(platformInfo, ChannelData::g_channelDualOutput, ChannelData::NoSet);
+	checkResolutionForPlatform(parent, platformName, channelTyp, pls_is_dual_output_on() && dualOutput == ChannelData::VerticalOutput);
 }
 
-void ResolutionGuidePage::checkResolutionForPlatform(QWidget *parent, const QString &platformName, int channelTyp)
+void ResolutionGuidePage::checkResolutionForPlatform(QWidget *parent, const QString &platformName, int channelTyp, bool bVerticalOutput)
 {
-	if (isCurrentResolutionFitableFor(platformName, channelTyp)) {
+	if (isCurrentResolutionFitableFor(platformName, channelTyp, bVerticalOutput)) {
 		return;
 	}
 	showIntroduceTip(parent, translatePlatformName(platformName));
 }
 
-bool ResolutionGuidePage::isCurrentResolutionFitableFor(const QString &platform, int channelType)
+bool ResolutionGuidePage::isCurrentResolutionFitableFor(const QString &platform, int channelType, bool bVerticalOutput)
 {
 	const auto &platformResolution = PLSSyncServerManager::instance()->getLivePlatformResolutionFPSMap();
 	static const auto &rtmpResolution = PLSSyncServerManager::instance()->getRtmpPlatformFPSMap();
@@ -483,21 +753,16 @@ bool ResolutionGuidePage::isCurrentResolutionFitableFor(const QString &platform,
 		return true;
 	}
 
-	auto mainView = PLSBasic::Get();
-	auto settings = mainView->Config();
-	auto width = config_get_uint(settings, "Video", "OutputCX");
-	auto height = config_get_uint(settings, "Video", "OutputCY");
-	auto fps = config_get_int(settings, "Video", "FPSInt");
-
-	auto searchResolution = QString("%1x%2").arg(width).arg(height);
+	QString outFps = PLSServerStreamHandler::instance()->getOutputFps();
+	QString searchResolution = PLSServerStreamHandler::instance()->getOutputResolution(bVerticalOutput);
 
 	if (auto platformResolutionMap = searchMap.value(searchKey).toMap(); platformResolutionMap.contains(searchResolution)) {
 		auto validFps = platformResolutionMap.value(searchResolution);
-		if (validFps.canConvert<QString>() && validFps.toString() == QString::number(fps)) {
+		if (validFps.canConvert<QString>() && validFps.toString() == outFps) {
 			return true;
 		}
 
-		if (validFps.canConvert<QStringList>() && validFps.toStringList().contains(QString::number(fps))) {
+		if (validFps.canConvert<QStringList>() && validFps.toStringList().contains(outFps)) {
 			return true;
 		}
 	}
@@ -507,19 +772,21 @@ bool ResolutionGuidePage::isCurrentResolutionFitableFor(const QString &platform,
 
 void ResolutionGuidePage::setVisibleOfGuide(QWidget *parent, const UpdateCallback &callback, const IsUserNeed &agreeFun, bool isVisible)
 {
+	auto mianView = PLSBasic::instance()->getMainView();
+	mianView->setResolutionBtnCheck(true);
 	if (parent == nullptr) {
-		parent = pls_get_main_view();
+		parent = mianView;
 	}
 
 	auto page = createInstance(parent);
 
-	auto setvisibleOf = [page, callback, agreeFun](bool isVisibleL) {
+	auto setvisibleOf = [page, callback, agreeFun, mianView](bool isVisibleL) {
 		if (isVisibleL) {
 
 			page->setUpdateResolutionFunction(callback);
 			page->setAgreeFunction(agreeFun);
 			page->exec();
-
+			mianView->setResolutionBtnCheck(false);
 			return;
 		}
 		page->reject();
@@ -537,45 +804,54 @@ bool ResolutionGuidePage::setUsingPlatformPreferResolution(const QString &platfo
 	return setResolution(resolution);
 }
 
-bool ResolutionGuidePage::setResolution(int width, int height, int fps, bool toChangeCanvas)
+bool ResolutionGuidePage::setResolution(int width, int height, int fps, bool toChangeCanvas, bool bVerticalOutput)
 {
 	if (pls_is_output_actived()) {
 		return false;
 	}
+
+	if (0 == width) {
+		width = 1280;
+	}
+	if (0 == height) {
+		height = 720;
+	}
+	if (0 == fps) {
+		fps = 30;
+	}
 	auto mainView = PLSBasic::instance();
 	auto settings = mainView->Config();
 
-	config_set_uint(settings, "Video", "OutputCX", width);
-	config_set_uint(settings, "Video", "OutputCY", height);
+	config_set_uint(settings, "Video", bVerticalOutput ? "OutputCXV" : "OutputCX", width);
+	config_set_uint(settings, "Video", bVerticalOutput ? "OutputCYV" : "OutputCY", height);
 	config_set_uint(settings, "Video", "FPSType", 1);
 	config_set_int(settings, "Video", "FPSInt", fps);
 
 	if (toChangeCanvas) {
-		config_set_uint(settings, "Video", "BaseCX", width);
-		config_set_uint(settings, "Video", "BaseCY", height);
+		config_set_uint(settings, "Video", bVerticalOutput ? "BaseCXV" : "BaseCX", width);
+		config_set_uint(settings, "Video", bVerticalOutput ? "BaseCYV" : "BaseCY", height);
 	}
 	config_save(settings);
 	mainView->ResetVideo();
-	mainView->showEncodingInStatusBar();
 	mainView->ResetOutputs();
 	return true;
 }
 
-bool ResolutionGuidePage::setResolution(const Resolution &resolution, bool toChangeCanvas)
+bool ResolutionGuidePage::setResolution(const Resolution &resolution, bool toChangeCanvas, bool bVerticalOutput)
 {
 
-	if (!setResolution(resolution.width, resolution.height, resolution.fps, toChangeCanvas)) {
+	if (!setResolution(resolution.width, resolution.height, resolution.fps, toChangeCanvas, bVerticalOutput)) {
 		return false;
 	}
 	if (resolution.bitrate > 0) {
-		return setVideoBitrate(resolution.bitrate);
+		return setVideoBitrateAndKeyFrameInterval(resolution.bitrate, resolution.keyframeInterval);
 	}
 	return true;
 }
 
 OBSData GetDataFromJsonFile(const char *jsonFile);
 
-bool ResolutionGuidePage::setVideoBitrate(int bitrate)
+bool ResolutionGuidePage::setVideoBitrateAndKeyFrameInterval(int bitrate, int keyframeInterval)
 {
 	if (pls_is_output_actived()) {
 		return false;
@@ -589,6 +865,12 @@ bool ResolutionGuidePage::setVideoBitrate(int bitrate)
 		return false;
 	}
 	obs_data_set_int(streamEncSettings, "bitrate", bitrate);
+	if (keyframeInterval > 20) {
+		PLS_WARN("ResolutionGuidePage", "keyframeInterval can not > 20");
+	}
+	if (keyframeInterval != -1) {
+		obs_data_set_int(streamEncSettings, "keyint_sec", keyframeInterval);
+	}
 	std::string fullPath(512, '\0');
 
 	if (GetProfilePath(fullPath.data(), fullPath.size(), "streamEncoder.json") <= 0) {

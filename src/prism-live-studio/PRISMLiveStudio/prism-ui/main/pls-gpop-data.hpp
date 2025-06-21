@@ -5,7 +5,6 @@
 #include <QObject>
 
 #include "pls-gpop-data-struct.hpp"
-#include "json-data-handler.hpp"
 
 class PLSGpopData : public QObject {
 	Q_OBJECT
@@ -14,18 +13,13 @@ public:
 	static PLSGpopData *instance();
 	void getGpopData(const QByteArray &gpopData);
 
-	//use these functions ,you should set your json file in 'DefaultSources.qrc' under path ':/Configs/DefaultResources'
-	static QByteArray getDefaultValuesOf(const QString &key);
-	template<typename DestType> static void useDefaultValues(const QString &key, DestType &dest)
-	{
-		auto data = getDefaultValuesOf(key);
-		PLSJsonDataHandler::jsonTo(data, dest);
-	}
-
 	//public:
 	Common getCommon();
 	QMap<QString, SnsCallbackUrl> getSnscallbackUrls();
 	QMap<QString, SnsCallbackUrl> getDefaultSnscallbackUrls();
+	const QStringList &getChannelList();
+	const QStringList &getChannelResolutionGuidList();
+	const QStringList &getLoginList() const;
 	Connection getConnection();
 
 	int getUIBlockingTimeS() const;
@@ -36,6 +30,7 @@ private:
 	void initDefaultValues();
 	void initCommon();
 	void initSnscallbackUrls();
+	void initSupportedPlatforms();
 
 	//private:
 	explicit PLSGpopData(QObject *parent = nullptr);
@@ -49,8 +44,13 @@ private:
 	QByteArray m_gpopDataArray;
 	Common m_common;
 	QMap<QString, SnsCallbackUrl> m_snsCallbackUrls;
-	QMap<QString, SnsCallbackUrl> m_defaultCallbackUrls;;
-
+	QMap<QString, SnsCallbackUrl> m_defaultCallbackUrls;
+	QStringList m_channelList;
+	QStringList m_channelResolutionGuidList;
+	QStringList m_loginList;
+	QStringList m_defaultChannelList;
+	QStringList m_defaultChannelResolutionGuidList;
+	QStringList m_defaultLoginList;
 	Connection m_connection;
 
 	int m_iMultiplePlatformMaxBitrate = 0;

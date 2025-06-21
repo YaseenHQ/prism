@@ -4,17 +4,18 @@
 #include <QWidget>
 #include <qbuttongroup.h>
 #include <qpointer.h>
-#include "PLSDialogView.h"
+#include "PLSWindow.h"
 #include <qsystemtrayicon.h>
 #include <qscrollarea.h>
 #include <qlayoutitem.h>
 #include <QHBoxLayout>
 #include <qjsonobject.h>
+#include "libresource.h"
 namespace Ui {
 class PLSLaunchWizardView;
 }
 class PLSWizardInfoView;
-class PLSLaunchWizardView : public PLSDialogView {
+class PLSLaunchWizardView : public PLSWindow {
 	Q_OBJECT
 
 public:
@@ -33,10 +34,12 @@ signals:
 	void mouseClicked(QObject *obj);
 	void sigTryGetScheduleList();
 	void loadBannerFailed();
-	void bannerImageLoadFinished(const QMap<QString, bool> &resDownloadStatus);
+	void bannerImageLoadFinished(const std::list<pls::rsm::DownloadResult> &results);
+	void bannerJsonDownloaded();
 
 protected:
 	bool eventFilter(QObject *watched, QEvent *event) override;
+	virtual void closeEvent(QCloseEvent *event) override;
 
 private:
 	void setUserInfo(const QVariantMap &info = QVariantMap());
@@ -64,11 +67,11 @@ private:
 
 	void moveWidget(int index, bool pre = true);
 
-	void handlePrismState(const QJsonObject &body) const;
-	void handleChannelMessage(const QJsonObject &body);
-	void checkShowErrorAlert();
+	void handlePrismState(const QVariantMap &body) const;
+	void handleChannelMessage(const QVariantMap &body);
+	void checkShowErrorAlert(const QVariantMap &body);
 
-	void handleErrorMessgage(const QJsonObject &body);
+	void handleErrorMessgage(const QVariantMap &body);
 	void setErrorViewVisible(bool visible = true);
 
 	void clearDumpInfos() const;
@@ -77,6 +80,7 @@ private:
 	void updateTipsHtml();
 
 	void checkStackOrder() const;
+	void getBannerJson();
 
 public slots:
 	void singletonWakeup();
@@ -86,7 +90,7 @@ public slots:
 
 private slots:
 	void startUpdateBanner();
-	void finishedDownloadBanner(const QMap<QString, bool> &resDownloadStatus);
+	void finishedDownloadBanner(const std::list<pls::rsm::DownloadResult> &results);
 	void changeBannerView();
 	void checkBannerButtonsState();
 	void delayCheckButtonsState();
@@ -106,7 +110,6 @@ private:
 	QPointer<PLSWizardInfoView> m_alertInfoView;
 	QPointer<QScrollArea> scrollArea;
 	QPointer<QHBoxLayout> scrollLay;
-	QJsonObject m_scheduleInfo;
 
 	static QPointer<PLSLaunchWizardView> g_wizardView;
 
@@ -126,6 +129,7 @@ private:
 
 	int m_UpdateCount = 0;
 	bool m_bShowFlag = false;
+	QString m_josnPath;
 };
 
 QString formatTimeStr(const QDateTime &time);

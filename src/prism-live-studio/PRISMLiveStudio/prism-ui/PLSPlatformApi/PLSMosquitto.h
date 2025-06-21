@@ -10,23 +10,25 @@
 #include "mosquittopp.h"
 
 #include <thread>
+#include <atomic>
 #include <QObject>
 #include <QList>
 #include <QPointer>
 #include <QThread>
 #include <qreadwritelock.h>
+#include <qsemaphore.h>
+#include "PLSDualOutputConst.h"
 
 class PLSMosquitto : public QObject, private mosqpp::mosquittopp {
 	Q_OBJECT
 public:
-	PLSMosquitto();
+	PLSMosquitto(DualOutputType outputType);
 	~PLSMosquitto() override = default;
 
 	void start(int iVideoSeq);
 	void stop();
 signals:
-	//IMPORTANT: Different thread, Must pass by value
-	void onMessage(QString, QString);
+	void onMessage(const QString &, const QString &, DualOutputType outputType);
 
 private:
 	void subscribleAll();
@@ -39,4 +41,7 @@ private:
 	int m_iVideoSeq = 0;
 	QString m_mqttUrl;
 	QThread *m_thread{nullptr};
+	QSemaphore m_connected;
+
+	DualOutputType m_outputType = DualOutputType::All;
 };

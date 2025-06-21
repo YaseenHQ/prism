@@ -17,6 +17,7 @@
 #include "PLSSyncServerManager.hpp"
 #include "frontend-api.h"
 #include "pls-gpop-data.hpp"
+#include "pls/pls-dual-output.h"
 #include "prism-version.h"
 #include "ui-config.h"
 
@@ -108,12 +109,14 @@ int PLSChannelDataAPI::countTask(const QString &taskName) const
 
 void PLSChannelDataAPI::endTransactions()
 {
+	PLS_INFO("Channel", "end transactions");
 	if (mTransactions.isEmpty()) {
+		updatePlatformViewerCount();
 		return;
 	}
 
-	PLSCHANNELS_API->sigAllChannelRefreshDone();
-
+	PLSCHANNELS_API->sigOperationChannelDone();
+	PLS_INFO("Channel", "Operation Channel Done");
 	QVariantList tasks = mTransactions.value(ChannelTransactionsKeys::g_taskQueue).toList();
 	if (tasks.isEmpty()) {
 		mTransactions.clear();
@@ -188,9 +191,15 @@ void PLSChannelDataAPI::connectSignals()
 
 	auto handleExpired = [](const QString &uuid, bool toAsk) { resetExpiredChannel(uuid, toAsk); };
 	connect(this, &PLSChannelDataAPI::channelExpired, qApp, handleExpired, Qt::DirectConnection);
-	auto handlePrismExpired = []() { reloginPrismExpired(); };
+	auto handlePrismExpired = [](const PLSErrorHandler::RetData &data) { reloginPrismExpired(data); };
 	connect(this, &PLSChannelDataAPI::prismTokenExpired, qApp, handlePrismExpired, Qt::QueuedConnection);
 
+	auto handleB2BExpired = [](const QString &channelName) {
+		PLS_INFO("Channel", "b2b token expired when in live, end living will logout");
+		PLSErrorHandler::showAlertByPrismCode(PLSErrorHandler::CHANNEL_NCP_B2B_401_PREPARELIVE, channelName, "");
+		pls_prism_change_over_login_view();
+	};
+	connect(this, &PLSChannelDataAPI::sigB2BChannelEndLivingCheckExpired, qApp, handleB2BExpired, Qt::QueuedConnection);
 	//in shifting
 	connect(PLS_PLATFORM_API, &PLSPlatformApi::livePrepared, this, [this](bool isOk) {
 		if (isOk) {
@@ -233,6 +242,8 @@ void PLSChannelDataAPI::connectSignals()
 
 	connect(
 		this, &PLSChannelDataAPI::rehearsalBegin, this, [this]() { this->setRehearsal(true); }, Qt::QueuedConnection);
+
+	pls_connect(this, &PLSChannelDataAPI::sigSetChannelDualOutput, this, &PLSChannelDataAPI::delaySave, Qt::QueuedConnection);
 }
 
 void PLSChannelDataAPI::registerEnumsForStream() const
@@ -326,10 +337,19 @@ QPixmap PLSChannelDataAPI::updateImage(const QString &oldPath, const QString &sr
 QPixmap PLSChannelDataAPI::updateImage(const QString &srcPath, const QSize &size)
 {
 	QFileInfo fInfo(srcPath);
+
+	//don't remove this folder
+	bool bRemove = true;
+	QString tmpPath = QString("PRISMLiveStudio/resources/library/library_Policy_PC/images");
+	tmpPath = pls_get_user_path(tmpPath);
+	if (srcPath.contains(tmpPath, Qt::CaseInsensitive)) {
+		bRemove = false;
+	}
+
 	QVariantMap imageMap = mImagesCache.value(fInfo.fileName());
 	QPixmap tmp;
 	if (!imageMap.isEmpty()) {
-		if (fInfo.isWritable()) {
+		if (fInfo.isWritable() && bRemove) {
 			QFile::remove(srcPath);
 		}
 		// to get target size image
@@ -339,7 +359,7 @@ QPixmap PLSChannelDataAPI::updateImage(const QString &srcPath, const QSize &size
 	//try to load source image
 	loadPixmap(tmp, srcPath, size);
 
-	if (fInfo.isWritable()) {
+	if (fInfo.isWritable() && bRemove) {
 		QFile::remove(srcPath);
 	}
 	//if load fail return null
@@ -407,10 +427,10 @@ void PLSChannelDataAPI::updateChannelInfo(const QString &channelUUID, const QVar
 {
 
 	QWriteLocker locker(&mInfosLocker);
-	auto platName = getInfo(Infos, g_platformName);
+	auto platName = getInfo(Infos, g_channelName);
 	platName = toPlatformCodeID(platName, true);
 	auto tmp = Infos;
-	tmp[g_platformName] = platName;
+	tmp[g_channelName] = platName;
 	mChannelInfos[channelUUID] = tmp;
 	mChannelInfos[channelUUID][g_isPresetRTMP] = PLSSyncServerManager::instance()->isPresetRTMP(getInfo(Infos, g_channelRtmpUrl));
 }
@@ -454,10 +474,11 @@ void PLSChannelDataAPI::reCheckExpiredChannels()
 	auto ite = mExpiredChannels.begin();
 	while (ite != mExpiredChannels.end()) {
 		const auto &info = ite.value();
-		auto platformName = getInfo(info, g_platformName);
+		auto platformName = getInfo(info, g_channelName);
+		auto retData = getInfo<PLSErrorHandler::RetData>(info, g_errorRetdata);
 		this->removeChannelsByPlatformName(platformName, ChannelDataType::ChannelType, false, false);
 		QMetaObject::invokeMethod(
-			getMainWindow(), [platformName]() { reloginChannel(platformName, true); }, Qt::QueuedConnection);
+			getMainWindow(), [platformName, retData]() { reloginChannel(platformName, true, retData); }, Qt::QueuedConnection);
 		++ite;
 	}
 	mExpiredChannels.clear();
@@ -495,11 +516,12 @@ void PLSChannelDataAPI::finishAdding(const QString &channelUUID)
 
 	if (bool isLeader = getInfo(info, g_isLeader, true); getInfo(info, g_channelStatus, InValid) == Valid && isLeader) {
 		// exclusive band rtmp,v live, Now etc....
-		exclusiveChannelCheckAndVerify(info);
+		if (!pls_is_dual_output_on())
+			exclusiveChannelCheckAndVerify(info);
 		int childrenSelected = 0;
 		if (myType == ChannelType) {
-			childrenSelected = static_cast<int>(this->getCurrentSelectedPlatformChannels(getInfo(info, g_platformName), ChannelType).count());
-			showResolutionTips(getInfo(info, g_platformName));
+			childrenSelected = static_cast<int>(this->getCurrentSelectedPlatformChannels(getInfo(info, g_channelName), ChannelType).count());
+			showResolutionTips(getInfo(info, g_channelName));
 		} else {
 			showResolutionTips(CUSTOM_RTMP);
 		}
@@ -507,7 +529,11 @@ void PLSChannelDataAPI::finishAdding(const QString &channelUUID)
 		if (childrenSelected == 0) {
 			int currentSeleted = this->currentSelectedCount();
 			if (currentSeleted < g_maxActiveChannels) {
-				this->setChannelUserStatus(channelUUID, Enabled);
+				if (pls_is_dual_output_on()) {
+					pls_async_call(this, [this, channelUUID]() { setOutputDirectionWhenAddChannel(channelUUID); });
+				} else {
+					this->setChannelUserStatus(channelUUID, Enabled);
+				}
 				this->setValueOfChannel(channelUUID, g_displayState, true);
 			}
 		}
@@ -540,8 +566,9 @@ void PLSChannelDataAPI::setChannelInfos(const QVariantMap &Infos, bool notify, b
 	if (notify) {
 		emit channelModified(channelUUID);
 	}
-
-	if (int newUserStatus = getInfo(Infos, g_channelUserStatus, NotExist); getInfo(lastInfo, g_channelUserStatus, NotExist) != newUserStatus) {
+	int newUserStatus = getInfo(Infos, g_channelUserStatus, NotExist);
+	int orgUserStatus = getInfo(lastInfo, g_channelUserStatus, NotExist);
+	if (orgUserStatus != newUserStatus) {
 		emit channelActiveChanged(channelUUID, newUserStatus == Enabled);
 	}
 }
@@ -557,9 +584,9 @@ bool PLSChannelDataAPI::replaceChannelInfo(const QString &channelUUID, QVariantM
 	lastInfo = ite.value();
 	*ite = Infos;
 	(*ite)[g_isPresetRTMP] = PLSSyncServerManager::instance()->isPresetRTMP(getInfo(Infos, g_channelRtmpUrl));
-	auto platName = getInfo(Infos, g_platformName);
+	auto platName = getInfo(Infos, g_channelName);
 	platName = toPlatformCodeID(platName, true);
-	(*ite)[g_platformName] = platName;
+	(*ite)[g_channelName] = platName;
 	return true;
 }
 
@@ -674,7 +701,7 @@ bool PLSChannelDataAPI::isInWholeRecording() const
 	return (currentReocrdState() != RecordReady && currentReocrdState() != RecordStopped);
 }
 
-ChannelsMap PLSChannelDataAPI::getCurrentSelectedChannels(int Type) const
+ChannelsMap PLSChannelDataAPI::getCurrentSelectedChannels(int Type)
 {
 	QVariantMap searchmap;
 	searchmap.insert(g_channelUserStatus, ChannelData::Enabled);
@@ -709,12 +736,12 @@ ChannelsMap PLSChannelDataAPI::getCurrentSelectedPlatformChannels(const QString 
 	auto isMatched = [&](const QVariantMap &info) {
 		int myType = getInfo(info, g_data_type, NoType);
 		bool isTypeMatch = ((srcType == NoType) ? true : (myType == srcType));
-		return getInfo(info, g_platformName).contains(platform) && getInfo(info, g_channelUserStatus, Disabled) == Enabled && isTypeMatch;
+		return getInfo(info, g_channelName).contains(platform) && getInfo(info, g_channelUserStatus, Disabled) == Enabled && isTypeMatch;
 	};
 
 	for (const auto &info : mChannelInfos) {
 		if (isMatched(info)) {
-			retMap.insert(getInfo(info, g_platformName), info);
+			retMap.insert(getInfo(info, g_channelName), info);
 		}
 	}
 	return retMap;
@@ -759,6 +786,14 @@ void PLSChannelDataAPI::setChannelUserStatus(const QString &channelUuid, int isA
 			return;
 		}
 
+		auto outputDir = getValueOfChannel(channelUuid, ChannelData::g_channelDualOutput, NoSet);
+		if (isActive == Disabled && outputDir != NoSet) {
+			setValueOfChannel(channelUuid, ChannelData::g_channelDualOutput, NoSet);
+			sigSetChannelDualOutput(channelUuid, NoSet);
+			if (!pls_is_dual_output_on()) {
+				clearDualOutput();
+			}
+		}
 		if (notify) {
 			emit channelActiveChanged(channelUuid, isActive == Enabled);
 			emit channelModified(channelUuid);
@@ -815,10 +850,11 @@ QVariantMap &PLSChannelDataAPI::getChanelInfoRef(const QString &channelUUID)
 QVariantMap &PLSChannelDataAPI::getChanelInfoRefByPlatformName(const QString &channelName, int type)
 {
 	QReadLocker locker(&mInfosLocker);
+	auto tempName = NCB2BConvertChannelName(channelName);
 	auto isSameName = [&](const QVariantMap &info) {
-		QString platFormName = getInfo(info, g_platformName);
+		QString platFormName = getInfo(info, g_channelName);
 		int channelT = getInfo(info, g_data_type, NoType);
-		return (platFormName == channelName) && (channelT == type);
+		return (platFormName == tempName) && (channelT == type);
 	};
 
 	if (auto ret = std::find_if(mChannelInfos.begin(), mChannelInfos.end(), isSameName); ret != mChannelInfos.end()) {
@@ -834,7 +870,7 @@ const QVariantMap &PLSChannelDataAPI::getChanelInfoRefBySubChannelID(const QStri
 {
 	QReadLocker locker(&mInfosLocker);
 	auto isSameID = [&](const QVariantMap &info) {
-		QString platFormName = getInfo(info, g_platformName);
+		QString platFormName = getInfo(info, g_channelName);
 		QString channelID = getInfo(info, ChannelData::g_subChannelId);
 		return (platFormName == channelName) && (channelID == subChannelID);
 	};
@@ -853,6 +889,8 @@ InfosList PLSChannelDataAPI::getChanelInfosByPlatformName(const QString &channel
 	QReadLocker locker(&mInfosLocker);
 	InfosList retLst;
 
+	auto tempName = NCB2BConvertChannelName(channelName);
+
 	for (const auto &info : mChannelInfos) {
 		bool isTypeMatch = true;
 
@@ -860,7 +898,7 @@ InfosList PLSChannelDataAPI::getChanelInfosByPlatformName(const QString &channel
 			int myType = getInfo(info, g_data_type, NoType);
 			isTypeMatch = (type == myType);
 		}
-		if (getInfo(info, g_platformName) == channelName && isTypeMatch) {
+		if (getInfo(info, g_channelName) == tempName && isTypeMatch) {
 			retLst << info;
 		}
 	}
@@ -889,7 +927,7 @@ bool PLSChannelDataAPI::isPlatformHasCountForEndView(const QString &platformName
 EndLiveList PLSChannelDataAPI::getEndLiveList(const QVariantMap &info) const
 {
 	EndLiveList ret;
-	auto platform = getInfo(info, g_platformName);
+	auto platform = getInfo(info, g_channelName);
 	auto type = getInfo(info, g_data_type, NoType);
 	if (type != ChannelType) {
 		return ret;
@@ -911,7 +949,8 @@ void PLSChannelDataAPI::updatePlatformsStates()
 {
 	QStringList platforms = getDefaultPlatforms();
 	for (auto platform : platforms) {
-		mPlatformStates.insert(platform, true);
+		auto platformName = channleNameConvertFixPlatformName(platform);
+		mPlatformStates.insert(platformName, true);
 	}
 }
 
@@ -938,6 +977,30 @@ const QMap<QString, QString> &PLSChannelDataAPI::getRTMPInfos()
 {
 	updateRtmpGpopInfos();
 	return mRtmps;
+}
+
+QStringList PLSChannelDataAPI::getUuidListOfRISTandSRT()
+{
+	QStringList uuidList;
+	QReadLocker locker(&mInfosLocker);
+	for (const auto &info : mChannelInfos) {
+		int myType = getInfo(info, g_data_type, NoType);
+		if (myType == SRTType || myType == RISTType) {
+			auto uuid = getInfo(info, g_channelUUID);
+			uuidList << uuid;
+		}
+	}
+	PLS_INFO("Channels", "get size of SRT or RIST is %d", uuidList.count());
+	return uuidList;
+}
+
+void PLSChannelDataAPI::addRISTandSRT2RtmpServer()
+{
+	QStringList uuidList = getUuidListOfRISTandSRT();
+	for (const auto &uuid : uuidList) {
+		PLS_INFO("Channels", "add SRT or RIST to new api,uuid is %s", uuid.toUtf8().constData());
+		AddOrgDataToNewApi(uuid, false);
+	}
 }
 
 std::tuple<bool, bool> PLSChannelDataAPI::isPlatformBeSurportedByCurrentVersion(const QString &platform) const
@@ -977,7 +1040,7 @@ void PLSChannelDataAPI::tryRemoveChannel(const QString &channelUUID, bool notify
 		PRE_LOG_MSG_STEP("channel has been removed ", g_removeChannelStep, WARN)
 		return;
 	}
-	auto platformName = getInfo(info, g_platformName);
+	auto platformName = getInfo(info, g_channelName);
 	bool isMultiChildren = this->isPlatformMultiChildren(platformName);
 	int myType = getInfo(info, g_data_type, NoType);
 	if (isMultiChildren && myType == ChannelType) {
@@ -1001,19 +1064,28 @@ void PLSChannelDataAPI::removeChannelInfo(const QString &channelUUID, bool notif
 	}
 
 	int channelT = getInfo(tmpInfo, g_data_type, NoType);
-	if (channelT == RTMPType && notifyServer) {
+	if (channelT >= RTMPType && notifyServer) {
 
 		RTMPDeleteToPrism(channelUUID);
 		return;
 	}
 
 	int count = removeInfo(channelUUID);
-	auto platformName = getInfo(tmpInfo, g_platformName, QString(" empty "));
-
-	QString msg = " End remmove channel " + channelUUID + " platform: " + platformName;
+	if (!pls_is_dual_output_on() && getInfo(tmpInfo, g_channelDualOutput, NoSet) != NoSet) {
+		clearDualOutput();
+	}
+	auto channelName = getInfo(tmpInfo, g_channelName, QString(" empty "));
+	auto bLeader = getInfo(tmpInfo, g_isLeader, false);
+	QString msg = " End remmove channel " + channelUUID + " channel: " + channelName;
 	PRE_LOG_MSG_STEP(msg, g_removeChannelStep, INFO)
 	if (count > 0 && notify) {
+		auto platformName = getInfo(tmpInfo, g_fixPlatformName);
+		PLSBasic::instance()->ClearService(platformName);
 		emit channelRemoved(channelUUID);
+		channelRemovedForCheckVideo(bLeader);
+		if (platformName == CHZZK) {
+			channelRemovedForChzzk();
+		}
 	}
 
 	if (channelT == ChannelType) {
@@ -1068,9 +1140,9 @@ InfosList PLSChannelDataAPI::sortAllChannels()
 			return ltype < rtype;
 		}
 
-		QString lplatform = getInfo(left, g_platformName);
+		QString lplatform = getInfo(left, g_channelName);
 
-		if (QString rplatform = getInfo(right, g_platformName); lplatform != rplatform) {
+		if (QString rplatform = getInfo(right, g_channelName); lplatform != rplatform) {
 			return isPlatformOrderLessThan(lplatform, rplatform);
 		}
 
@@ -1088,6 +1160,7 @@ InfosList PLSChannelDataAPI::sortAllChannels()
 		auto uuid = getInfo(info, g_channelUUID);
 		ret << info;
 		this->setValueOfChannel(uuid, g_displayOrder, i);
+		emit channelModified(uuid);
 	}
 
 	return ret;
@@ -1095,7 +1168,8 @@ InfosList PLSChannelDataAPI::sortAllChannels()
 
 void PLSChannelDataAPI::clearAll()
 {
-	emit sigAllClear();
+	PLS_INFO("Channels", "prism logout will clear all channels");
+	QWriteLocker locker(&mInfosLocker);
 	mChannelInfos.clear();
 	mImagesCache.clear();
 }
@@ -1120,7 +1194,7 @@ int countError(const QVariantList &errorsList, int errorType)
 {
 	auto isMatchedType = [errorType](const QVariant &error) {
 		auto errorTmp = error.toMap();
-		auto errorActType = errorTmp.value(ChannelData::g_errorType).toInt();
+		auto errorActType = errorTmp.value(g_errorRetdata).value<PLSErrorHandler::RetData>().prismCode;
 		return errorActType == errorType;
 	};
 
@@ -1171,7 +1245,7 @@ void PLSChannelDataAPI::onAllScheduleListUpdated() const
 	}
 	if (first.isEmpty()) {
 		auto errors = PLS_PLATFORM_API->getAllLastErrors();
-		if (!errors.isEmpty() && countError(errors, channel_data::NetWorkErrorType::NetWorkNoStable) > 0) {
+		if (!errors.isEmpty() && countError(errors, PLSErrorHandler::COMMON_NETWORK_ERROR) > 0) {
 			first = errors.first().toMap();
 		}
 	}
@@ -1204,9 +1278,30 @@ void PLSChannelDataAPI::reloadData()
 	if (QFile::exists(cachePath)) {
 		ChannelsMap tmp;
 		loadDataFromFile(tmp, cachePath);
+		bool bExistCHzzk = false;
 		if (!tmp.isEmpty()) {
-			mChannelInfos = std::move(tmp);
+			mChannelInfos = tmp;
 			verifyRename(mChannelInfos);
+			std::for_each(tmp.begin(), tmp.end(), [this, &bExistCHzzk](QVariantMap &info) {
+				auto type = getInfo(info, g_data_type, NoType);
+				if (type == ChannelType) {
+					auto channelName = getInfo(info, g_channelName, QString());
+					auto supportPlatforms = getDefaultPlatforms();
+					auto uuid = getInfo(info, g_channelUUID, QString());
+					if (!supportPlatforms.contains(channelName)) {
+						removeInfo(uuid);
+						return;
+					}
+					auto platform = channleNameConvertFixPlatformName(channelName);
+					setValueOfChannel(uuid, g_fixPlatformName, platform);
+					if (!bExistCHzzk && platform == CHZZK) {
+						bExistCHzzk = true;
+					}
+				}
+			});
+		}
+		if (!bExistCHzzk) {
+			channelRemovedForChzzk();
 		}
 	}
 }
@@ -1268,7 +1363,10 @@ void PLSChannelDataAPI::setRecordState(int state)
 	case RecordStopped:
 		if (!PLS_PLATFORM_API->isStopForExit()) {
 			auto isShowEnd = lastState == RecordStopping;
-			auto end = [isShowEnd]() { PLS_PLATFORM_API->showEndView(true, isShowEnd); };
+			auto end = [isShowEnd]() {
+				PLS_INFO("Channel", "singleShot setRecordState");
+				PLS_PLATFORM_API->showEndView(true, isShowEnd);
+			};
 			QTimer::singleShot(100, qApp, end);
 		}
 
@@ -1325,6 +1423,7 @@ void PLSChannelDataAPI::setBroadcastState(int event)
 	case CanBroadcastState:
 
 		if (!toGoLive()) {
+			emit startFailed();
 			this->setBroadcastState(ReadyState);
 			return;
 		}
@@ -1424,7 +1523,8 @@ void PLSChannelDataAPI::registerPlatformHandler(ChannelDataBaseHandler *handler)
 
 PlatformHandlerPtrs PLSChannelDataAPI::getPlatformHandler(const QString &platformName) const
 {
-	return mPlatformHandler.value(platformName.toUpper());
+	auto name = channleNameConvertFixPlatformName(platformName);
+	return mPlatformHandler.value(name.toUpper());
 }
 
 bool PLSChannelDataAPI::isPlatformMultiChildren(const QString &platformName) const
@@ -1439,7 +1539,30 @@ bool PLSChannelDataAPI::isPlatformMultiChildren(const QString &platformName) con
 bool PLSChannelDataAPI::isChannelMultiChildren(const QString &uuid) const
 {
 	auto info = getChannelInfo(uuid);
-	return isPlatformMultiChildren(getInfo(info, g_platformName));
+	return isPlatformMultiChildren(getInfo(info, g_channelName));
+}
+
+ChannelsMap PLSChannelDataAPI::getMatchKeysInfos(const QVariantMap &keysMap)
+{
+	ChannelsMap ret;
+	auto isMatched = [&](const QVariantMap &info) {
+		for (auto srcIte = keysMap.cbegin(); srcIte != keysMap.cend(); ++srcIte) {
+			if (srcIte.value() != getInfo(info, srcIte.key(), QVariant())) {
+				return false;
+			}
+		}
+		return true;
+	};
+
+	QReadLocker locker(&mInfosLocker);
+	for (auto ite = mChannelInfos.cbegin(); ite != mChannelInfos.cend(); ++ite) {
+		const auto &info = ite.value();
+		if (isMatched(info)) {
+			ret.insert(ite.key(), info);
+		}
+	}
+
+	return ret;
 }
 
 void PLSChannelDataAPI::stopAll()
@@ -1450,6 +1573,99 @@ void PLSChannelDataAPI::stopAll()
 
 	if (currentReocrdState() == RecordStarted) {
 		toStopRecord();
+	}
+}
+
+void PLSChannelDataAPI::getChannelCountOfOutputDirection(QStringList &horOutputList, QStringList &verOutputList)
+{
+	QReadLocker locker(&mInfosLocker);
+	for (const QVariantMap info : mChannelInfos) {
+		auto outputDirection = getInfo(info, g_channelDualOutput, NoSet);
+		auto uuid = getInfo(info, g_channelUUID, QString());
+		if (outputDirection == HorizontalOutput) {
+			horOutputList.append(uuid);
+		} else if (outputDirection == VerticalOutput) {
+			verOutputList.append(uuid);
+		}
+	}
+}
+
+void PLSChannelDataAPI::setChannelDefaultOutputDirection()
+{
+	QStringList horOutputList, verOutputList;
+	getChannelCountOfOutputDirection(horOutputList, verOutputList);
+	int horOutputCount = horOutputList.count();
+	int verOutputCount = verOutputList.count();
+
+	auto uuidList = PLSChannelDataAPI::getCurrentSortedChannelsUUID();
+	for (const QString uuid : uuidList) {
+		auto outputDirection = getValueOfChannel(uuid, g_channelDualOutput, NoSet);
+		auto userStatus = getValueOfChannel(uuid, g_channelUserStatus, NotExist);
+		if (outputDirection == NoSet && userStatus == Enabled) {
+			if (isExclusiveChannel(uuid)) {
+				//dont use setChannelUserStatus
+				// the setChannelUserStatus function is an asynchronous modification
+				//This requires synchronous modification
+				setValueOfChannel(uuid, g_channelUserStatus, Disabled);
+				continue;
+			}
+			if (horOutputCount == 0) {
+				setValueOfChannel(uuid, g_channelDualOutput, HorizontalOutput);
+				++horOutputCount;
+				sigSetChannelDualOutput(uuid, HorizontalOutput);
+				continue;
+			}
+			if (verOutputCount == 0) {
+				setValueOfChannel(uuid, g_channelDualOutput, VerticalOutput);
+				++verOutputCount;
+				sigSetChannelDualOutput(uuid, VerticalOutput);
+				continue;
+			}
+			//dont use setChannelUserStatus
+			// the setChannelUserStatus function is an asynchronous modification
+			//This requires synchronous modification
+			setValueOfChannel(uuid, g_channelUserStatus, Disabled);
+		}
+	}
+}
+
+void PLSChannelDataAPI::setOutputDirectionWhenAddChannel(const QString &uuid)
+{
+	QStringList horOutputList, verOutputList;
+	getChannelCountOfOutputDirection(horOutputList, verOutputList);
+	int horOutputCount = horOutputList.count();
+	int verOutputCount = verOutputList.count();
+	if ((horOutputCount >= 1 && verOutputCount >= 1) || isExclusiveChannel(uuid)) {
+		setChannelUserStatus(uuid, Disabled);
+		return;
+	}
+	setChannelUserStatus(uuid, Enabled);
+	if (horOutputCount == 0) {
+		setValueOfChannel(uuid, ChannelData::g_channelDualOutput, HorizontalOutput);
+		return;
+	}
+	if (verOutputCount == 0) {
+		setValueOfChannel(uuid, ChannelData::g_channelDualOutput, VerticalOutput);
+		return;
+	}
+}
+
+bool PLSChannelDataAPI::isCanSetDualOutput(const QString &uuid) const
+{
+	if (/*!isExclusiveChannel(uuid) && */ PLSCHANNELS_API->getChannelUserStatus(uuid) == Enabled) {
+		return true;
+	}
+	return false;
+}
+
+void PLSChannelDataAPI::clearDualOutput()
+{
+	QWriteLocker locker(&mInfosLocker);
+	for (QVariantMap &info : mChannelInfos) {
+		auto outputDirection = getInfo(info, g_channelDualOutput, NoSet);
+		if (outputDirection != NoSet) {
+			info.remove(g_channelDualOutput);
+		}
 	}
 }
 

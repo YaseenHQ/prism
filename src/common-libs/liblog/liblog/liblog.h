@@ -25,6 +25,11 @@
 
 #endif
 
+//PRISM/wangshaohui/20241203/none/define field for PTS
+#define PTS_LOG_TYPE "PTSLogType"     // field name for log type
+#define PTS_TYPE_EVENT "event"        // field value for exception or app stats
+#define PTS_TYPE_UISTEP_STEP "uiStep" // field value for UI STEP
+
 enum pls_log_level_t {
 	PLS_LOG_ERROR, // error
 	PLS_LOG_WARN,  // warning
@@ -85,11 +90,23 @@ using pls_ui_step_log_handler_t = void (*)(const char *module_name, const pls_da
   */
 LIBLOG_API bool pls_log_init(const char *project_name, const char *project_token, const char *project_name_kr, const char *project_token_kr, const char *project_version, const char *log_source,
 			     const char *local_log_session = nullptr);
-LIBLOG_API bool pls_prism_log_init(const char *project_version, const char *log_source, const char *local_log_session = nullptr);
+LIBLOG_API bool pls_prism_log_init(const char *project_version, const char *log_source, const char *local_log_session);
 /**
   * log cleanup
   */
 LIBLOG_API void pls_log_cleanup();
+
+/**
+  * process nelo fields
+  */
+LIBLOG_API std::vector<std::pair<QByteArray, QByteArray>> pls_to_fields(const std::vector<std::pair<QString, QString>> &fields);
+LIBLOG_API std::vector<std::pair<const char *, const char *>> pls_to_fields(const std::vector<std::pair<QByteArray, QByteArray>> &fields);
+LIBLOG_API std::vector<std::pair<const char *, const char *>> pls_to_fields(const std::vector<std::pair<std::string, std::string>> &fields);
+LIBLOG_API const std::vector<std::pair<const char *, const char *>> &pls_to_fields(const std::vector<std::pair<const char *, const char *>> &fields);
+LIBLOG_API std::vector<std::pair<const char *, const char *>> &pls_to_fields(std::vector<std::pair<const char *, const char *>> &result, const std::vector<std::pair<QByteArray, QByteArray>> &fields);
+LIBLOG_API std::vector<std::pair<const char *, const char *>> &pls_to_fields(std::vector<std::pair<const char *, const char *>> &result,
+									     const std::vector<std::pair<std::string, std::string>> &fields);
+LIBLOG_API std::vector<std::pair<const char *, const char *>> pls_join_fields(std::vector<std::pair<const char *, const char *>> &&fields, const std::vector<std::pair<QByteArray, QByteArray>> &extra);
 
 /**
   * set custom log handler
@@ -310,7 +327,7 @@ LIBLOG_API void pls_ui_stepex(bool kr, const char *module_name, const char *cont
   */
 LIBLOG_API void pls_crash_flag();
 
-LIBLOG_API void pls_subprocess_exception(const char *process, const char *pid, const char *src);
+LIBLOG_API void pls_subprocess_exception(const char *process, const char *pid);
 
 LIBLOG_API void pls_set_gcc(const char *gcc);
 

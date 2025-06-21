@@ -3,12 +3,13 @@
 
 #include <QWidget>
 #include <QListView>
+#include <QPushButton>
 #include <QAbstractListModel>
 #include "PLSDialogView.h"
 #include "PLSSceneCollectionItem.h"
 #include "PLSCommonScrollBar.h"
 
-enum class SceneCollectionCustomRole { DataRole = Qt::UserRole, VisibleRole, CurrentRole, DelButtonDisableRole, UserLocalPathRole };
+enum class SceneCollectionCustomRole { DataRole = Qt::UserRole, VisibleRole, CurrentRole, DelButtonDisableRole, UserLocalPathRole, EnterRole };
 Q_DECLARE_METATYPE(SceneCollectionCustomRole)
 
 namespace Ui {
@@ -16,6 +17,39 @@ class PLSSceneCollectionView;
 }
 
 class PLSSceneCollectionListView;
+
+class PLSClickButton : public QWidget {
+	Q_OBJECT
+public:
+	explicit PLSClickButton(QWidget *parent);
+
+	void setDisplayText(const QString &text);
+	void setShowOverlay(bool show);
+
+protected:
+	void enterEvent(QEnterEvent *event) override;
+	void leaveEvent(QEvent *event) override;
+
+signals:
+	void newBtnClicked();
+	void importFromLocalBtnClicked();
+	void importFromOtherBtnClicked();
+
+private:
+	QPushButton *iconButton{nullptr};
+	QLabel *textLabel{nullptr};
+	QPushButton *baseContent{nullptr};
+	QPushButton *overlay{nullptr};
+	bool showOverlay = false;
+};
+
+class PLSSceneTemplateButton : public QPushButton {
+	Q_OBJECT
+public:
+	explicit PLSSceneTemplateButton(QWidget *parent);
+
+private:
+};
 
 class PLSSceneCollectionModel : public QAbstractListModel {
 	Q_OBJECT
@@ -88,6 +122,7 @@ private slots:
 	void OnRenameBtnClicked(const QString &name, const QString &path) const;
 	void OnDuplicateBtnClicked(const QString &name, const QString &path) const;
 	void OnDeleteBtnClicked(const QString &name, const QString &path) const;
+	void OnEnverEvent(const QString &name, const QString &path);
 
 private:
 	void SetPaintLinePos(int startPosX, int startPosY, int endPosX, int endPosY);
@@ -95,6 +130,7 @@ private:
 signals:
 	void RowChanged(int srcIndex, int destIndex);
 	void ScrollBarShow(bool show);
+	void TriggerEventEvent(const QString &name, const QString &path);
 
 private:
 	QPoint startDragPoint{};
@@ -130,15 +166,14 @@ protected:
 private slots:
 	void OnSearchTriggerd(const QString &text) const;
 	void OnSceneCollectionItemRowChanged(int srcIndex, int destIndex) const;
-	void OnImportButtonClicked();
 	void OnImportFromLocalButtonClicked();
 	void OnImportFromOtherButtonClicked() const;
+	void OnShowSceneTemplateView() const;
 	void OnCloseButtonClicked();
 	void OnScrollBarShow(bool show);
 	void HandleEnterEvent(const QObject *obj, const QEvent *) const;
-	void HandleLeaveEvent(const QObject *obj, const QEvent *) const;
-	void HandlePressEvent(const QObject *obj, QEvent *) const;
-	void HandleReleaseEvent(const QObject *obj, QEvent *);
+	void OnTriggerEnterEvent(const QString &name, const QString &path);
+
 signals:
 	void currentSceneCollectionChanged(QString name, QString path);
 	void newButtonClicked();

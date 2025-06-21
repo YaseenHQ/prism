@@ -30,6 +30,7 @@
 #include "prism-version.h"
 #include "PLSBasic.h"
 #include "pls/pls-properties.h"
+#include "flowlayout.h"
 
 using namespace common;
 static const int TEXT_EDIT_TOP_MARGIN = 13;
@@ -63,11 +64,37 @@ PLSContactView::PLSContactView(const QString &message, const QString &additional
 {
 	ui = pls_new<Ui::PLSContactView>();
 	setupUi(ui);
+
+	if (auto index = ui->verticalLayout_3->indexOf(ui->horizontalLayout_3); -1 != index) {
+		auto flowLayout = pls_new<FlowLayout>(nullptr, 0, 6, 6);
+		flowLayout->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+		flowLayout->setContentsMargins(0, 0, 0, 0);
+		
+		flowLayout->addWidget(ui->radioButtonTypeError);
+		flowLayout->addWidget(ui->radioButtonTypeAdvice);
+		flowLayout->addWidget(ui->radioButtonTypeConsult);
+		flowLayout->addWidget(ui->radioButtonTypeOther);
+
+		ui->radioButtonTypeError->show();
+		ui->radioButtonTypeAdvice->show();
+		ui->radioButtonTypeConsult->show();
+		ui->radioButtonTypeOther->show();
+		
+		delete ui->horizontalLayout_3;
+		ui->verticalLayout_3->insertLayout(index, flowLayout);
+	}
+
+	m_pInquireType = pls_new<PLSRadioButtonGroup>(this);
+	m_pInquireType->addButton(ui->radioButtonTypeError, static_cast<int>(PLS_CONTACTUS_QUESTION_TYPE::Error));
+	m_pInquireType->addButton(ui->radioButtonTypeAdvice, static_cast<int>(PLS_CONTACTUS_QUESTION_TYPE::Advice));
+	m_pInquireType->addButton(ui->radioButtonTypeConsult, static_cast<int>(PLS_CONTACTUS_QUESTION_TYPE::Consult));
+	m_pInquireType->addButton(ui->radioButtonTypeOther, static_cast<int>(PLS_CONTACTUS_QUESTION_TYPE::Other));
+
 	chooseFileDir = QStandardPaths::standardLocations(QStandardPaths::DesktopLocation).first();
 	setResizeEnabled(false);
 	setMoveInContent(true);
 	pls_add_css(this, {"PLSLoadingBtn", "PLSContactView"});
-	initSize(480, 489);
+	setFixedSize(480, 576);
 	ui->sendButton->setEnabled(false);
 	ui->inquryTipLabel->setText("");
 	ui->tagTextEdit->setHidden(false);
@@ -145,6 +172,10 @@ void PLSContactView::updateSendButtonState()
 {
 	if (!checkMailValid()) {
 		ui->sendButton->setEnabled(false);
+		return;
+	}
+
+	if (m_pInquireType->checkedId() == -1) {
 		return;
 	}
 
@@ -241,6 +272,7 @@ void PLSContactView::initConnect() const
 	QObject::connect(ui->emailLineEdit, &QLineEdit::editingFinished, this, &PLSContactView::on_emailLineEdit_editingFinished);
 	QObject::connect(ui->emailLineEdit, &QLineEdit::textChanged, this, &PLSContactView::on_emailLineEdit_textChanged);
 	QObject::connect(ui->textEdit, &QTextEdit::textChanged, this, &PLSContactView::on_textEdit_textChanged, Qt::QueuedConnection);
+	connect(m_pInquireType, &PLSRadioButtonGroup::idClicked, this, &PLSContactView::updateSendButtonState);
 }
 
 bool PLSContactView::checkAddFileValid(const QFileInfo &fileInfo, int &errorLevel) const
@@ -306,6 +338,8 @@ bool PLSContactView::checkFileFormatValid(const QFileInfo &fileInfo) const
 			valid = false;
 		}
 	}
+	PLS_INFO(CONTACT_US_MODULE, "file name is %s, file suffix is %s, file suffix lower is %s", fileInfo.fileName().toUtf8().constData(), fileInfo.suffix().toUtf8().constData(),
+		 fileInfo.suffix().toLower().toUtf8().constData());
 	return valid;
 }
 
@@ -635,6 +669,7 @@ void PLSContactView::on_fileButton_clicked()
 		ui->inquryTipLabel->setText(QTStr("Contact.File.Max.Count"));
 		return;
 	}
+	pls::HotKeyLocker locker;
 	QString filter("Image Files(*.bmp *.jpg *.gif *.png);;Video Files(*.avi *.mp4 *.mpv *.mov);;Text Files(*.txt);;Zip Files(*.zip)");
 	QStringList paths = QFileDialog::getOpenFileNames(this, QString(), chooseFileDir, filter);
 	if (!paths.isEmpty()) {
@@ -689,7 +724,8 @@ void PLSContactView::on_sendButton_clicked()
 		fileLists.append(info);
 	}
 
-	pls_upload_file_result_t chooseFileResult = pls_upload_contactus_files(ui->emailLineEdit->text(), textContent, fileLists);
+	pls_upload_file_result_t chooseFileResult =
+		pls_upload_contactus_files(static_cast<PLS_CONTACTUS_QUESTION_TYPE>(m_pInquireType->checkedId()), ui->emailLineEdit->text(), textContent, fileLists);
 	hideLoading();
 	QFile::remove(filePath);
 	if (chooseFileResult != pls_upload_file_result_t::Ok && this->isVisible()) {
@@ -720,18 +756,6 @@ void PLSContactView::on_cancelButton_clicked()
 
 void PLSContactView::on_textEdit_textChanged()
 {
-	QString textContent = ui->textEdit->toPlainText();
-	int length = (int)textContent.count();
-	if (length > textEditLengthLimit) {
-		QSignalBlocker signalBlocker(ui->textEdit);
-		int position = ui->textEdit->textCursor().position();
-		QTextCursor textCursor = ui->textEdit->textCursor();
-		textContent.remove(position - (length - textEditLengthLimit), length - textEditLengthLimit);
-		ui->textEdit->setText(textContent);
-		textCursor.setPosition(position - (length - textEditLengthLimit));
-		ui->textEdit->setTextCursor(textCursor);
-	}
-
 	if (m_message.length() > 0) {
 
 		QTextCursor cursor = ui->textEdit->textCursor();
@@ -749,6 +773,17 @@ void PLSContactView::on_textEdit_textChanged()
 			QSignalBlocker signalBlocker(ui->textEdit);
 			ui->textEdit->document()->undo();
 		}
+	}
+
+	QString textContent = ui->textEdit->toPlainText();
+	int length = (int)textContent.count();
+	if (length > textEditLengthLimit) {
+		QSignalBlocker signalBlocker(ui->textEdit);
+		QTextCursor textCursor = ui->textEdit->textCursor();
+		textCursor.setPosition(textEditLengthLimit, QTextCursor::MoveAnchor);
+		textCursor.setPosition(length, QTextCursor::KeepAnchor);
+		textCursor.removeSelectedText();
+		ui->textEdit->setTextCursor(textCursor);
 	}
 
 	updateSendButtonState();

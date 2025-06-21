@@ -17,7 +17,9 @@
 #include <qstring.h>
 #include <qobject.h>
 #include <qpointer.h>
+#include <qdir.h>
 #include <qfile.h>
+#include <qfileinfo.h>
 #include <qlist.h>
 #include <qthread.h>
 #include <qhash.h>
@@ -30,6 +32,7 @@
 #include <qjsonobject.h>
 #include <qcborvalue.h>
 #include <qset.h>
+#include <qversionnumber.h>
 
 #if defined(Q_OS_WIN)
 #include <malloc.h>
@@ -52,15 +55,16 @@ LIBUTILSAPI_API void pls_object_remove(const QObject *object);
 LIBUTILSAPI_API bool pls_open_file(std::optional<QFile> &file, const QString &file_path, QFile::OpenMode mode);
 LIBUTILSAPI_API bool pls_open_file(std::optional<QFile> &file, const QString &file_path, QFile::OpenMode mode, QString &error);
 LIBUTILSAPI_API bool pls_mkdir(const QString &dir_path);
+LIBUTILSAPI_API bool pls_mkfiledir(const QString &file_path);
 
 LIBUTILSAPI_API QVariantHash pls_map_to_hash(const QMap<QString, QString> &map);
 LIBUTILSAPI_API QMap<QString, QString> pls_hash_to_map(const QVariantHash &hash);
 
-LIBUTILSAPI_API QByteArray pls_read_data(const QString &file_path);
-LIBUTILSAPI_API bool pls_read_data(QByteArray &data, const QString &file_path);
-LIBUTILSAPI_API bool pls_write_data(const QString &file_path, const QByteArray &data);
-LIBUTILSAPI_API bool pls_read_cbor(QCborValue &cbor, const QString &file_path);
-LIBUTILSAPI_API bool pls_write_cbor(const QString &file_path, QCborValue &cbor);
+LIBUTILSAPI_API QByteArray pls_read_data(const QString &file_path, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_read_data(QByteArray &data, const QString &file_path, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_write_data(const QString &file_path, const QByteArray &data, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_read_cbor(QCborValue &cbor, const QString &file_path, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_write_cbor(const QString &file_path, QCborValue &cbor, QString *error = nullptr);
 LIBUTILSAPI_API QByteArray pls_remove_utf8_bom(const QByteArray &utf8);
 
 struct pls_cmdline_args_t {
@@ -81,26 +85,74 @@ LIBUTILSAPI_API std::optional<quint32> pls_cmdline_get_uint32_arg(const QStringL
 LIBUTILSAPI_API std::optional<qint64> pls_cmdline_get_int64_arg(const QStringList &args, const QString &name);
 LIBUTILSAPI_API std::optional<quint64> pls_cmdline_get_uint64_arg(const QStringList &args, const QString &name);
 
-LIBUTILSAPI_API bool pls_read_json(QJsonDocument &doc, const QString &file_path);
-LIBUTILSAPI_API bool pls_read_json(QJsonArray &array, const QString &file_path);
-LIBUTILSAPI_API bool pls_read_json(QJsonObject &object, const QString &file_path);
-LIBUTILSAPI_API bool pls_write_json(const QString &file_path, const QJsonDocument &doc);
-LIBUTILSAPI_API bool pls_write_json(const QString &file_path, const QJsonArray &array);
-LIBUTILSAPI_API bool pls_write_json(const QString &file_path, const QJsonObject &object);
-LIBUTILSAPI_API bool pls_read_json_cbor(QJsonDocument &doc, const QString &file_path);
-LIBUTILSAPI_API bool pls_read_json_cbor(QJsonArray &array, const QString &file_path);
-LIBUTILSAPI_API bool pls_read_json_cbor(QJsonObject &object, const QString &file_path);
-LIBUTILSAPI_API bool pls_write_json_cbor(const QString &file_path, const QJsonDocument &doc);
-LIBUTILSAPI_API bool pls_write_json_cbor(const QString &file_path, const QJsonArray &array);
-LIBUTILSAPI_API bool pls_write_json_cbor(const QString &file_path, const QJsonObject &object);
+LIBUTILSAPI_API bool pls_read_json(QJsonDocument &doc, const QString &file_path, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_read_json(QJsonArray &array, const QString &file_path, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_read_json(QVariantList &list, const QString &file_path, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_read_json(QJsonObject &object, const QString &file_path, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_read_json(QVariantMap &map, const QString &file_path, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_read_json(QVariantHash &hash, const QString &file_path, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_write_json(const QString &file_path, const QJsonDocument &doc, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_write_json(const QString &file_path, const QJsonArray &array, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_write_json(const QString &file_path, const QVariantList &list, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_write_json(const QString &file_path, const QJsonObject &object, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_write_json(const QString &file_path, const QVariantMap &map, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_write_json(const QString &file_path, const QVariantHash &hash, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_read_json_cbor(QJsonDocument &doc, const QString &file_path, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_read_json_cbor(QJsonArray &array, const QString &file_path, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_read_json_cbor(QVariantList &list, const QString &file_path, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_read_json_cbor(QJsonObject &object, const QString &file_path, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_read_json_cbor(QVariantMap &map, const QString &file_path, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_read_json_cbor(QVariantHash &hash, const QString &file_path, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_write_json_cbor(const QString &file_path, const QJsonDocument &doc, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_write_json_cbor(const QString &file_path, const QJsonArray &array, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_write_json_cbor(const QString &file_path, const QVariantList &list, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_write_json_cbor(const QString &file_path, const QJsonObject &object, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_write_json_cbor(const QString &file_path, const QVariantMap &map, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_write_json_cbor(const QString &file_path, const QVariantHash &hash, QString *error = nullptr);
+
+LIBUTILSAPI_API bool pls_parse_json(QJsonDocument &doc, const QByteArray &json, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_parse_json(QJsonArray &array, const QByteArray &json, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_parse_json(QVariantList &list, const QByteArray &json, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_parse_json(QJsonObject &object, const QByteArray &json, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_parse_json(QVariantMap &map, const QByteArray &json, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_parse_json(QVariantHash &hash, const QByteArray &json, QString *error = nullptr);
 
 LIBUTILSAPI_API QStringList pls_to_string_list(const QJsonArray &array);
+LIBUTILSAPI_API QVariantList pls_to_variant_list(const QJsonArray &array);
 LIBUTILSAPI_API QJsonArray pls_to_json_array(const QStringList &string_list);
+LIBUTILSAPI_API QJsonArray pls_to_json_array(const QVariantList &variant_list);
 LIBUTILSAPI_API QString pls_to_string(const QJsonArray &array);
 LIBUTILSAPI_API QString pls_to_string(const QJsonObject &object);
 LIBUTILSAPI_API QJsonArray pls_to_json_array(const QString &jsonArray);
 LIBUTILSAPI_API QJsonObject pls_to_json_object(const QString &jsonObject);
-LIBUTILSAPI_API bool pls_save_file(const QString &path, const QByteArray &data);
+
+// Only search all objects recursively, do not process arrays
+LIBUTILSAPI_API std::optional<QJsonValue> pls_find_attr(const QJsonObject &object, const QString &name, bool recursion = true, const std::optional<QJsonValue::Type> &type = std::nullopt);
+
+LIBUTILSAPI_API std::optional<QJsonValue> pls_get_attr(const QJsonObject &object, const QString &name);
+LIBUTILSAPI_API std::optional<QJsonValue> pls_get_attr(const QJsonObject &object, const QStringList &names, qsizetype from = 0, qsizetype n = -1);
+
+// Find all objects and arrays
+// a.[].b.c => {"a","[]","b","c"}
+struct pls_attr_name_t {
+	enum { First = 0, Last = -1, All = -2 };
+
+	QString m_name;
+	qsizetype m_index = First; // 0: first, >0 spec, -1: last, -2: All when name=[]
+	pls_attr_name_t(const QString &name) : m_name(name) {}
+	pls_attr_name_t(int index) : m_name(QStringLiteral("[]")), m_index(index) {}
+	pls_attr_name_t(const QString &name, int index) : m_name(name), m_index(index) {}
+};
+LIBUTILSAPI_API QList<pls_attr_name_t> pls_to_attr_names(const QStringList &names, int index = pls_attr_name_t::First);
+LIBUTILSAPI_API std::optional<QJsonValue> pls_get_attr(const QJsonValue &json, const pls_attr_name_t &name);
+LIBUTILSAPI_API QList<QJsonValue> pls_get_attrs(const QJsonValue &json, const pls_attr_name_t &name);
+LIBUTILSAPI_API std::optional<QJsonValue> pls_get_attr(const QJsonValue &json, const QList<pls_attr_name_t> &names, qsizetype from = 0, qsizetype n = -1);
+LIBUTILSAPI_API QList<QJsonValue> pls_get_attrs(const QJsonValue &json, const QList<pls_attr_name_t> &names, qsizetype from = 0, qsizetype n = -1);
+
+LIBUTILSAPI_API std::optional<QVariant> pls_get_attr(const QVariantHash &attrs, const QString &name);
+LIBUTILSAPI_API std::optional<QVariant> pls_get_attr(const QVariantMap &attrs, const QString &name);
+LIBUTILSAPI_API std::optional<QVariant> pls_get_attr(const QVariantHash &attrs, const QStringList &names, qsizetype from = 0, qsizetype n = -1);
+LIBUTILSAPI_API std::optional<QVariant> pls_get_attr(const QVariantMap &attrs, const QStringList &names, qsizetype from = 0, qsizetype n = -1);
 
 LIBUTILSAPI_API QString pls_get_app_dir();
 LIBUTILSAPI_API QString pls_get_dll_dir(const QString &dll_name);
@@ -115,8 +167,21 @@ LIBUTILSAPI_API bool pls_is_path_sep(wchar_t ch);
 LIBUTILSAPI_API const char *pls_get_path_file_name(const char *path);
 LIBUTILSAPI_API const wchar_t *pls_get_path_file_name(const wchar_t *path);
 LIBUTILSAPI_API QString pls_get_path_file_name(const QString &path);
+LIBUTILSAPI_API QString pls_get_path_file_suffix(const QString &path);
+LIBUTILSAPI_API bool pls_enum_dir(const QString &dir, const std::function<bool(const QString &reldir, const QFileInfo &fi)> &result,
+				  const std::function<bool(const QString &reldir, const QFileInfo &fi)> &filter = nullptr, bool recursion = true,
+				  QDir::Filters filters = QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot, QDir::SortFlags sort = QDir::DirsFirst | QDir::Name);
+LIBUTILSAPI_API QStringList pls_enum_dirs(const QString &dir, const std::function<bool(const QString &reldir, const QString &name)> &filter = nullptr, bool recursion = true,
+					  bool relative_dir = false);
+LIBUTILSAPI_API QStringList pls_enum_files(const QString &dir, const std::function<bool(const QString &reldir, const QString &name)> &filter = nullptr, bool recursion = true,
+					   bool relative_dir = false);
+LIBUTILSAPI_API std::optional<QString> pls_find_subdir_contains_spec_file(const QString &dir, const QString &file_name, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+LIBUTILSAPI_API std::optional<QString> pls_find_subdir_contains_spec_filename(const QString &dir, const QString &file_name, Qt::CaseSensitivity cs = Qt::CaseSensitive);
 LIBUTILSAPI_API bool pls_remove_file(const QString &path, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_remove_dir(const QString &path, QString *error = nullptr);
 LIBUTILSAPI_API bool pls_rename_file(const QString &old_file, const QString &new_file, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_copy_file(const QString &src_file, const QString &dest_file, QString *error = nullptr);
+LIBUTILSAPI_API bool pls_copy_dir(const QString &src_dir, const QString &dest_dir, QString *error = nullptr);
 LIBUTILSAPI_API QString pls_get_prism_subpath(const QString &subpath, bool creatIfNotExist = false);
 LIBUTILSAPI_API QString pls_get_installed_obs_version();
 
@@ -164,6 +229,8 @@ LIBUTILSAPI_API bool pls_shm_is_for_send(pls_shm_t *shm);
 LIBUTILSAPI_API bool pls_shm_is_for_receive(pls_shm_t *shm);
 LIBUTILSAPI_API int pls_shm_get_max_data_size(pls_shm_t *shm);
 LIBUTILSAPI_API bool pls_shm_is_online(pls_shm_t *shm);
+LIBUTILSAPI_API bool pls_shm_is_sender_online(pls_shm_t *shm);
+LIBUTILSAPI_API bool pls_shm_is_receiver_online(pls_shm_t *shm);
 
 struct pls_datetime_t {
 	int year;
@@ -193,7 +260,7 @@ LIBUTILSAPI_API bool pls_current_is_main_thread();
 
 LIBUTILSAPI_API QString pls_gen_uuid();
 
-LIBUTILSAPI_API bool pls_is_debugger_present();
+LIBUTILSAPI_API bool pls_is_debugger_present(int pid = -1);
 LIBUTILSAPI_API void pls_printf(const wchar_t *text);
 LIBUTILSAPI_API void pls_printf(const std::wstring &text);
 LIBUTILSAPI_API void pls_printf(const QString &text);
@@ -204,14 +271,19 @@ LIBUTILSAPI_API void pls_mac_printf(const char *format, ...);
 LIBUTILSAPI_API void pls_sync_invoke(QObject *object, const std::function<void()> &fn);
 LIBUTILSAPI_API void pls_async_invoke(QObject *object, const std::function<void()> &fn);
 LIBUTILSAPI_API void pls_async_invoke(QObject *object, const char *fn);
+LIBUTILSAPI_API void pls_async_invoke(std::function<void()> &&fn);
 
 LIBUTILSAPI_API bool pls_prism_is_dev();
+LIBUTILSAPI_API bool pls_prism_save_local_log();
+LIBUTILSAPI_API QVariant pls_prism_get_qsetting_value(QString key, QVariant defaultVal = {});
 
 LIBUTILSAPI_API void pls_prism_set_locale(const std::string &locale);
 LIBUTILSAPI_API QString pls_prism_get_locale();
 LIBUTILSAPI_API QString pls_get_local_ip();
 LIBUTILSAPI_API QString pls_get_local_mac();
 LIBUTILSAPI_API QList<QHostAddress> pls_get_valid_hosts();
+
+LIBUTILSAPI_API const char *pls_bool_2_string(bool b);
 
 LIBUTILSAPI_API bool pls_show_in_graphical_shell(const QString &pathIn);
 struct pls_win_ver_t {
@@ -230,11 +302,12 @@ LIBUTILSAPI_API QString pls_get_win_name_with_arch();
 #elif defined(Q_OS_MACOS)
 LIBUTILSAPI_API pls_mac_ver_t pls_get_mac_systerm_ver();
 LIBUTILSAPI_API bool pls_unZipFile(const QString &dstDirPath, const QString &srcFilePath);
+LIBUTILSAPI_API bool pls_zipFile(const QString &destZipPath, const QString &sourceDirName, const QString &sourceFolderPath);
 LIBUTILSAPI_API bool pls_copy_file_with_error_code(const QString &fileName, const QString &newName, bool overwrite, int &errorCode);
 LIBUTILSAPI_API QString pls_get_system_identifier();
 LIBUTILSAPI_API bool pls_file_is_existed(const QString &filePath);
-LIBUTILSAPI_API bool pls_install_mac_package(const QString &unzipFolderPath, const QString &destBundlePath);
-LIBUTILSAPI_API bool pls_restart_mac_app(const char *restartType);
+LIBUTILSAPI_API bool pls_install_mac_package(const QString &unzipFolderPath, const QString &destBundlePath, const std::string &prismSession, const std::string &prismGcc, const char *version);
+LIBUTILSAPI_API bool pls_restart_mac_app(const QStringList &arguments);
 LIBUTILSAPI_API QString pls_get_existed_downloaded_mac_app(const QString &downloadedBundleDir, const QString &downloadedVersion, bool deleteBundleExceptUpdatedBundle);
 LIBUTILSAPI_API bool pls_remove_all_downloaded_mac_app_small_equal_version(const QString &downloadedBundleDir, const QString &softwareVersion);
 LIBUTILSAPI_API void pls_bring_mac_window_to_front(WId winId);
@@ -258,6 +331,7 @@ LIBUTILSAPI_API bool pls_is_app_running(const char *bundle_id);
 LIBUTILSAPI_API bool pls_launch_app(const char *bundle_id, const char *app_name);
 LIBUTILSAPI_API QString pls_get_current_system_language_id();
 #endif
+LIBUTILSAPI_API QString pls_get_os_ver_string();
 
 LIBUTILSAPI_API std::wstring pls_utf8_to_unicode(const char *utf8);
 LIBUTILSAPI_API std::string pls_unicode_to_utf8(const wchar_t *unicode);
@@ -279,6 +353,7 @@ LIBUTILSAPI_API bool pls_is_process_running(const char *executableName, int &pid
 #endif
 
 LIBUTILSAPI_API uint64_t pls_get_prism_version();
+LIBUTILSAPI_API QString pls_get_prism_version_string();
 LIBUTILSAPI_API void pls_set_prism_version(uint64_t version);
 LIBUTILSAPI_API void pls_set_prism_version(uint16_t major, uint16_t minor, uint16_t patch, uint16_t build);
 LIBUTILSAPI_API uint16_t pls_get_prism_version_major();
@@ -300,6 +375,15 @@ LIBUTILSAPI_API qulonglong pls_get_qobject_id(const QObject *object);
 LIBUTILSAPI_API bool pls_check_qobject_id(const QObject *object, qulonglong object_id);
 LIBUTILSAPI_API bool pls_check_qobject_id(const QObject *object, qulonglong object_id, const std::function<bool(const QObject *object)> &is_valid);
 
+using pls_getter_t = std::function<QVariant()>;
+LIBUTILSAPI_API bool pls_add_object_getter(const QObject *object, const QByteArray &name, const pls_getter_t &getter);
+LIBUTILSAPI_API void pls_remove_object_getter(const QObject *object, const QByteArray &name);
+LIBUTILSAPI_API QVariant pls_call_object_getter(const QObject *object, const QByteArray &name);
+using pls_setter_t = std::function<void(QVariant)>;
+LIBUTILSAPI_API bool pls_add_object_setter(const QObject *object, const QByteArray &name, const pls_setter_t &setter);
+LIBUTILSAPI_API void pls_remove_object_setter(const QObject *object, const QByteArray &name);
+LIBUTILSAPI_API void pls_call_object_setter(const QObject *object, const QByteArray &name, const QVariant &value);
+
 LIBUTILSAPI_API int pls_get_platform_window_height_by_windows_height(int windowsHeight);
 
 struct pls_dl_t {
@@ -312,6 +396,8 @@ LIBUTILSAPI_API pls_fn_ptr_t pls_dlsym(pls_dl_t &dl, const char *func);
 LIBUTILSAPI_API void pls_dlclose(pls_dl_t &dl);
 
 LIBUTILSAPI_API std::string pls_get_cpu_name();
+
+LIBUTILSAPI_API bool pls_check_local_host();
 
 enum class pls_language_t { //
 	NotImplement = -1,
@@ -336,6 +422,15 @@ LIBUTILSAPI_API pls_language_t pls_get_os_language_from_lid(uint16_t lid);
 #endif
 
 LIBUTILSAPI_API bool pls_is_mouse_pressed(Qt::MouseButton button);
+
+#if defined(Q_OS_MACOS)
+LIBUTILSAPI_API void pls_set_current_lens(int index);
+#endif
+
+LIBUTILSAPI_API bool pls_is_os_sys_macos();
+
+//only attach, not crate or keep sharememory
+LIBUTILSAPI_API bool pls_set_temp_sharememory(const QString &key, const QString &val);
 
 namespace pls {
 template<typename QtApp> class Application : public QtApp {
@@ -542,6 +637,7 @@ struct QMetaObjectConnectionDeleter {
 	inline void operator()(const QMetaObject::Connection &connection) const { QObject::disconnect(connection); }
 };
 using MetaObjectConnection = AutoObject<QMetaObject::Connection, QMetaObjectConnectionDeleter>;
+template<typename T, typename... TSet> constexpr bool is_any_of_v = (std::is_same_v<T, TSet> || ...);
 }
 
 template<typename T, typename Deleter> using PLSAutoObject = pls::AutoObject<T, Deleter>;
@@ -650,8 +746,15 @@ template<typename T> void pls_delete_later(T *&object, std::nullptr_t)
 		object = nullptr;
 	}
 }
+template<typename T> void pls_delete_later(pls::QObjectPtr<T> &object)
+{
+	if (object.valid()) {
+		object->deleteLater();
+		object = nullptr;
+	}
+}
 
-template<typename T> void pls_delete_thread(T *thread)
+template<typename T> void pls_delete_thread(T thread)
 {
 	if (thread) {
 		thread->quit();
@@ -659,7 +762,7 @@ template<typename T> void pls_delete_thread(T *thread)
 		delete thread;
 	}
 }
-template<typename T> void pls_delete_thread(T *&thread, std::nullptr_t)
+template<typename T> void pls_delete_thread(T &thread, std::nullptr_t)
 {
 	pls_delete_thread(thread);
 	thread = nullptr;
@@ -774,6 +877,18 @@ template<typename T> inline void pls_bzero(T *ptr)
 	pls_bzero(ptr, sizeof(T));
 }
 
+template<typename T> T pls_fetch_add(T &ref, const T &value)
+{
+	auto old = ref;
+	ref += value;
+	return old;
+}
+template<typename T> T pls_add_fetch(T &ref, const T &value)
+{
+	ref += value;
+	return ref;
+}
+
 inline bool pls_is_empty(const char *str)
 {
 	return !str || !str[0];
@@ -801,6 +916,62 @@ inline bool pls_is_equal(const wchar_t *str1, const wchar_t *str2)
 	else if (!wcscmp(str1, str2))
 		return true;
 	return false;
+}
+inline bool pls_is_equal(float v1, float v2)
+{
+	return abs(v1 - v2) < 0.00001;
+}
+inline bool pls_is_equal(double v1, double v2)
+{
+	return abs(v1 - v2) < 0.000000001;
+}
+LIBUTILSAPI_API bool pls_is_equal(const QVariant &v1, const QVariant &v2, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+inline bool pls_is_equal(const QString &str1, const QString &str2, Qt::CaseSensitivity cs = Qt::CaseSensitive)
+{
+	return str1.compare(str2, cs) == 0;
+}
+template<typename T, typename IsEqual> inline auto pls_is_equal(const QList<T> &l1, const QList<T> &l2, IsEqual isEqual) -> std::enable_if_t<std::is_invocable_v<IsEqual, T, T>, bool>
+{
+	if (l1.size() != l2.size())
+		return false;
+	for (qsizetype i = 0, size = l1.size(); i < size; ++i)
+		if (!isEqual(l1[i], l2[i]))
+			return false;
+	return true;
+}
+template<typename K, typename V, typename IsEqual> auto pls_is_equal(const QHash<K, V> &h1, const QHash<K, V> &h2, IsEqual isEqual) -> std::enable_if_t<std::is_invocable_v<IsEqual, V, V>, bool>
+{
+	if (h1.size() != h2.size())
+		return false;
+	for (const auto &key : h1.keys())
+		if (!isEqual(h1.value(key), h2.value(key)))
+			return false;
+	return true;
+}
+template<typename K, typename V, typename IsEqual> auto pls_is_equal(const QMap<K, V> &h1, const QMap<K, V> &h2, IsEqual isEqual) -> std::enable_if_t<std::is_invocable_v<IsEqual, V, V>, bool>
+{
+	if (h1.size() != h2.size())
+		return false;
+	for (const auto &key : h1.keys())
+		if (!isEqual(h1.value(key), h2.value(key)))
+			return false;
+	return true;
+}
+inline bool pls_is_equal(const QStringList &l1, const QStringList &l2, Qt::CaseSensitivity cs = Qt::CaseSensitive)
+{
+	return pls_is_equal(l1, l2, [cs](const QString &s1, const QString &s2) { return pls_is_equal(s1, s2, cs); });
+}
+inline bool pls_is_equal(const QVariantHash &h1, const QVariantHash &h2, Qt::CaseSensitivity cs = Qt::CaseSensitive)
+{
+	return pls_is_equal(h1, h2, [cs](const QVariant &v1, const QVariant &v2) { return pls_is_equal(v1, v2, cs); });
+}
+inline bool pls_is_equal(const QVariantMap &m1, const QVariantMap &m2, Qt::CaseSensitivity cs = Qt::CaseSensitive)
+{
+	return pls_is_equal(m1, m2, [cs](const QVariant &v1, const QVariant &v2) { return pls_is_equal(v1, v2, cs); });
+}
+inline bool pls_is_equal(const QVariantList &l1, const QVariantList &l2, Qt::CaseSensitivity cs = Qt::CaseSensitive)
+{
+	return pls_is_equal(l1, l2, [cs](const QVariant &v1, const QVariant &v2) { return pls_is_equal(v1, v2, cs); });
 }
 
 template<typename Fn, typename... Args> inline auto pls_invoke(void *func, Args &&...args) -> std::invoke_result_t<Fn, Args...>
@@ -1408,6 +1579,92 @@ template<typename T, typename IsValid, typename Fn> void pls_async_call_mt(const
 	pls_async_call(qApp, object_ptrs, objects, isValid, fn);
 }
 
+namespace pls {
+template<typename... Args> struct TypeArray {};
+template<typename Callback, typename InArgs, typename RealArgs, bool Invocable> struct WraperCb;
+
+template<typename Callback, typename InArg, typename... InArgs, typename... RealArgs>
+struct WraperCb<Callback, TypeArray<InArg, InArgs...>, TypeArray<RealArgs...>, false>
+	: WraperCb<Callback, TypeArray<InArgs...>, TypeArray<RealArgs..., InArg>, std::is_invocable_v<Callback, RealArgs..., InArg>> {};
+
+template<typename Callback, typename InArg, typename... InArgs>
+struct WraperCb<Callback, TypeArray<InArg, InArgs...>, TypeArray<>, false> : WraperCb<Callback, TypeArray<InArgs...>, TypeArray<InArg>, std::is_invocable_v<Callback, InArg>> {};
+
+template<typename Callback, typename... InArgs, typename... RealArgs> struct WraperCb<Callback, TypeArray<InArgs...>, TypeArray<RealArgs...>, true> {
+	template<typename... Args> static void call(const Callback &callback, const std::tuple<Args...> &args) { call(callback, args, std::make_index_sequence<sizeof...(RealArgs)>{}); }
+	template<typename... Args, size_t... Idxs> static void call(const Callback &callback, const std::tuple<Args...> &args, std::index_sequence<Idxs...>) { callback(std::get<Idxs>(args)...); }
+};
+template<typename Callback, typename... InArgs> struct WraperCb<Callback, TypeArray<InArgs...>, TypeArray<>, true> {
+	template<typename... Args> static void call(const Callback &callback, const std::tuple<Args...> &args) { callback(); }
+};
+} // namespace pls
+
+template<typename Callback, typename... Args> auto pls_wrapper_cb(const QSet<pls::QObjectPtr<QObject>> &objects, const Callback &callback)
+{
+	return [callback, objects](Args... args) {
+		if (pls_objects_is_valid(objects)) {
+			pls::WraperCb<Callback, pls::TypeArray<Args...>, pls::TypeArray<>, std::is_invocable_v<Callback>>::call(callback, std::forward_as_tuple(args...));
+		}
+	};
+}
+
+template<typename Sender, typename SignalType, typename... SignalArgs, typename Receiver, typename SlotFn>
+auto pls_connect(Sender *sender, void (SignalType::*signalFn)(SignalArgs...), Receiver *receiver, SlotFn slotFn, const QSet<pls::QObjectPtr<QObject>> &objects,
+		 Qt::ConnectionType type = Qt::AutoConnection) -> std::enable_if_t<!std::is_member_function_pointer_v<SlotFn>, QMetaObject::Connection>
+{
+	pls::QObjectPtr<QObject> s(sender), r(receiver);
+	if (!s.valid() || !r.valid())
+		return {};
+	else if (objects.isEmpty())
+		return QObject::connect(sender, signalFn, receiver, pls_wrapper_cb<SlotFn, SignalArgs...>({r}, slotFn), type);
+	else {
+		QSet<pls::QObjectPtr<QObject>> objs{r};
+		pls_for_each(objects, [&objs](const auto &v) { objs.insert(v); });
+		return QObject::connect(sender, signalFn, receiver, pls_wrapper_cb<SlotFn, SignalArgs...>(objs, slotFn), type);
+	}
+}
+template<typename Sender, typename SignalType, typename... SignalArgs, typename Receiver, typename ReceiverType, typename SlotRet, typename... SlotArgs>
+QMetaObject::Connection pls_connect(Sender *sender, void (SignalType::*signalFn)(SignalArgs...), Receiver *receiver, SlotRet (ReceiverType::*slotFn)(SlotArgs...),
+				    const QSet<pls::QObjectPtr<QObject>> &objects, Qt::ConnectionType type = Qt::AutoConnection)
+{
+	return pls_connect(
+		sender, signalFn, receiver, [receiver, slotFn](SlotArgs... args) { (receiver->*slotFn)(args...); }, objects, type);
+}
+template<typename Sender, typename SignalType, typename... SignalArgs, typename SlotFn>
+QMetaObject::Connection pls_connect(Sender *sender, void (SignalType::*signalFn)(SignalArgs...), const QSet<pls::QObjectPtr<QObject>> &objects, SlotFn slotFn)
+{
+	return pls_connect(sender, signalFn, sender, slotFn, objects, Qt::DirectConnection);
+}
+
+template<typename Sender, typename SignalType, typename... SignalArgs, typename Receiver, typename SlotFn>
+auto pls_connect(Sender *sender, void (SignalType::*signalFn)(SignalArgs...), Receiver *receiver, SlotFn slotFn, Qt::ConnectionType type = Qt::AutoConnection)
+	-> std::enable_if_t<!std::is_member_function_pointer_v<SlotFn>, QMetaObject::Connection>
+{
+	return pls_connect(sender, signalFn, receiver, slotFn, {}, type);
+}
+template<typename Sender, typename SignalType, typename... SignalArgs, typename Receiver, typename ReceiverType, typename SlotRet, typename... SlotArgs>
+QMetaObject::Connection pls_connect(Sender *sender, void (SignalType::*signalFn)(SignalArgs...), Receiver *receiver, SlotRet (ReceiverType::*slotFn)(SlotArgs...),
+				    Qt::ConnectionType type = Qt::AutoConnection)
+{
+	return pls_connect(sender, signalFn, receiver, slotFn, {}, type);
+}
+template<typename Sender, typename SignalType, typename... SignalArgs, typename SlotFn> QMetaObject::Connection pls_connect(Sender *sender, void (SignalType::*signalFn)(SignalArgs...), SlotFn slotFn)
+{
+	return pls_connect(sender, signalFn, {}, slotFn);
+}
+
+template<typename K, typename V, typename Fn> void pls_for_each(const std::map<K, V> &map, Fn fn)
+{
+	for (const auto &i : map) {
+		pls_invoke(fn, i.first, i.second);
+	}
+}
+template<typename T, typename Fn> void pls_for_each(const std::list<T> &list, Fn fn)
+{
+	for (const auto &i : list) {
+		pls_invoke(fn, i);
+	}
+}
 template<typename K, typename V, typename Fn> void pls_for_each(const QHash<K, V> &hash, Fn fn)
 {
 	for (auto iter = hash.begin(), end_iter = hash.end(); iter != end_iter; ++iter) {
@@ -1486,14 +1743,309 @@ template<typename T, typename Fn> auto pls_filter(const QList<T> &list, Fn fn) -
 	}
 	return result;
 }
-template<typename T, typename Fn> auto pls_map(const QList<T> &list, Fn fn) -> QList<std::invoke_result_t<Fn, T>>
+template<typename T> using StdList = std::list<T>;
+template<typename List, typename T, typename Fn> List &pls_map(List &result, const QList<T> &list, Fn fn)
 {
-	QList<std::invoke_result_t<Fn, T>> result;
 	for (const auto &v : list) {
-		result.append(fn(v));
+		result.push_back(fn(v));
 	}
 	return result;
 }
+struct pls_emplace_back_t {};
+template<typename List, typename T, typename Fn> List &pls_map(List &result, const QList<T> &list, Fn fn, pls_emplace_back_t)
+{
+	for (const auto &v : list) {
+		result.emplace_back(fn(v));
+	}
+	return result;
+}
+template<typename List, typename T, typename Fn, typename... Emplace> auto pls_map(const QList<T> &list, Fn fn, Emplace &&...emplace) -> List
+{
+	List result;
+	pls_map(result, list, fn, std::forward<Emplace>(emplace)...);
+	return result;
+}
+template<template<typename T> class List, typename T, typename Fn, typename... Emplace> auto pls_map(const QList<T> &list, Fn fn, Emplace &&...emplace)
+{
+	return pls_map<List<std::invoke_result_t<Fn, T>>>(list, fn, std::forward<Emplace>(emplace)...);
+}
+template<typename R, typename T> R pls_copy(const std::list<T> &list)
+{
+	R result;
+	for (const auto &v : list) {
+		result.push_back(v);
+	}
+	return result;
+}
+template<typename T> auto pls_copy(const std::list<T> &list) -> std::list<T>
+{
+	return pls_copy<std::list<T>>(list);
+}
+template<typename R, typename T> R pls_copy(const QList<T> &list)
+{
+	R result;
+	for (const auto &v : list) {
+		result.push_back(v);
+	}
+	return result;
+}
+template<typename T> auto pls_copy(const QList<T> &list) -> QList<T>
+{
+	return pls_copy<QList<T>>(list);
+}
+
+template<template<typename T> class List, typename K, typename V> List<K> pls_get_keys(const std::map<K, V> &map)
+{
+	List<K> keys;
+	for (const auto &[key, _] : map)
+		keys.push_back(key);
+	return keys;
+}
+template<template<typename T> class List, typename K, typename V> List<K> pls_get_keys(const QHash<K, V> &hash)
+{
+	List<K> keys;
+	for (auto iter = hash.begin(), end_iter = hash.end(); iter != end_iter; ++iter)
+		keys.push_back(iter.key());
+	return keys;
+}
+template<template<typename T> class List, typename K, typename V> List<K> pls_get_keys(const QMap<K, V> &map)
+{
+	List<K> keys;
+	for (auto iter = map.begin(), end_iter = map.end(); iter != end_iter; ++iter)
+		keys.push_back(iter.key());
+	return keys;
+}
+
+template<typename K, typename V, typename DefVal> V pls_get_value(const std::map<K, V> &map, const K &key, const DefVal &defval)
+{
+	if (auto iter = map.find(key); iter != map.end())
+		return iter->second;
+	return defval;
+}
+template<typename K, typename V, typename DefVal> V pls_get_value(const QHash<K, V> &hash, const K &key, const DefVal &defval)
+{
+	if (auto iter = hash.find(key); iter != hash.end())
+		return iter.value();
+	return defval;
+}
+template<typename K, typename V, typename DefVal> V pls_get_value(const QMap<K, V> &map, const K &key, const DefVal &defval)
+{
+	if (auto iter = map.find(key); iter != map.end())
+		return iter.value();
+	return defval;
+}
+template<typename Value, typename K, typename V, typename DefVal> Value pls_get_value(const std::map<K, V> &map, const K &key, const DefVal &defval)
+{
+	if (auto iter = map.find(key); iter != map.end())
+		return iter->second;
+	return defval;
+}
+template<typename Value, typename K, typename V, typename DefVal> Value pls_get_value(const QHash<K, V> &hash, const K &key, const DefVal &defval)
+{
+	if (auto iter = hash.find(key); iter != hash.end())
+		return iter.value();
+	return defval;
+}
+template<typename Value, typename K, typename V, typename DefVal> Value pls_get_value(const QMap<K, V> &map, const K &key, const DefVal &defval)
+{
+	if (auto iter = map.find(key); iter != map.end())
+		return iter.value();
+	return defval;
+}
+template<typename T, typename DefVal = T> T pls_get_value(const std::list<T> &list, size_t index, const DefVal &defval = DefVal())
+{
+	size_t _index = 0;
+	for (const auto &val : list)
+		if (pls_fetch_add<size_t>(_index, 1) == index)
+			return val;
+	return defval;
+}
+template<typename T, typename DefVal = T> T pls_get_value(const QList<T> &list, size_t index, const DefVal &defval = DefVal())
+{
+	size_t _index = 0;
+	for (const auto &val : list)
+		if (pls_fetch_add<size_t>(_index, 1) == index)
+			return val;
+	return defval;
+}
+template<typename Val, typename T, typename ToVal, typename DefVal = Val> Val pls_get_value(const std::list<T> &list, size_t index, ToVal toVal, const DefVal &defval = DefVal())
+{
+	size_t _index = 0;
+	for (const auto &val : list)
+		if (pls_fetch_add<size_t>(_index, 1) == index)
+			return toVal(val);
+	return defval;
+}
+template<typename Val, typename T, typename ToVal, typename DefVal = Val> Val pls_get_value(const QList<T> &list, size_t index, ToVal toVal, const DefVal &defval = DefVal())
+{
+	size_t _index = 0;
+	for (const auto &val : list)
+		if (pls_fetch_add<size_t>(_index, 1) == index)
+			return toVal(val);
+	return defval;
+}
+template<typename Val, typename T, typename Pred, typename DefVal = Val>
+auto pls_get_value(const std::list<T> &list, Pred pred, const DefVal &defval = DefVal()) -> std::enable_if_t<std::is_invocable_v<Pred, T> && std::is_convertible_v<DefVal, Val>, Val>
+{
+	for (const auto &val : list)
+		if (pred(val))
+			return val;
+	return defval;
+}
+template<typename Val, typename T, typename Pred, typename DefVal = Val>
+auto pls_get_value(const QList<T> &list, Pred pred, const DefVal &defval = DefVal()) -> std::enable_if_t<std::is_invocable_v<Pred, T> && std::is_convertible_v<DefVal, Val>, Val>
+{
+	for (const auto &val : list)
+		if (pred(val))
+			return val;
+	return defval;
+}
+template<typename Val, typename T, typename Pred, typename ToVal, typename DefVal = Val>
+auto pls_get_value(const std::list<T> &list, Pred pred, ToVal toVal, const DefVal &defval = DefVal())
+	-> std::enable_if_t<std::is_invocable_v<Pred, T> && std::is_invocable_v<ToVal, T> && std::is_convertible_v<DefVal, Val>, Val>
+{
+	for (const auto &val : list)
+		if (pred(val))
+			return toVal(val);
+	return defval;
+}
+template<typename Val, typename T, typename Pred, typename ToVal, typename DefVal = Val>
+auto pls_get_value(const QList<T> &list, Pred pred, ToVal toVal, const DefVal &defval = DefVal())
+	-> std::enable_if_t<std::is_invocable_v<Pred, T> && std::is_invocable_v<ToVal, T> && std::is_convertible_v<DefVal, Val>, Val>
+{
+	for (const auto &val : list)
+		if (pred(val))
+			return toVal(val);
+	return defval;
+}
+
+template<typename T> T pls_find_attr(const QJsonObject &object, const QString &name, const T &defval = T(), bool recursion = true)
+{
+	static_assert(
+		pls::is_any_of_v<T, bool, QString, QStringList, float, double, qint32, quint32, qint64, quint64, QVariant, QVariantList, QVariantMap, QVariantHash, QJsonArray, QJsonObject, QJsonValue>,
+		"invalid json value type");
+	if constexpr (std::is_same_v<T, bool>)
+		return pls_find_attr(object, name, recursion, std::optional<QJsonValue::Type>(QJsonValue::Bool)).value_or(defval).toBool(defval);
+	else if constexpr (std::is_same_v<T, QString>)
+		return pls_find_attr(object, name, recursion, std::optional<QJsonValue::Type>(QJsonValue::String)).value_or(defval).toString(defval);
+	else if constexpr (std::is_same_v<T, QStringList>)
+		return pls_to_string_list(pls_find_attr(object, name, recursion, std::nullopt).value_or(QJsonArray::fromStringList(defval)).toArray());
+	else if constexpr (std::is_floating_point_v<T>)
+		return pls_find_attr(object, name, recursion, std::optional<QJsonValue::Type>(QJsonValue::Double)).value_or(defval).toDouble(defval);
+	else if constexpr (std::is_integral_v<T>)
+		return pls_find_attr(object, name, recursion, std::optional<QJsonValue::Type>(QJsonValue::Double)).value_or(defval).toInteger(defval);
+	else if constexpr (std::is_same_v<T, QVariant>)
+		return pls_find_attr(object, name, recursion, std::nullopt).value_or(QJsonValue::fromVariant(defval)).toVariant();
+	else if constexpr (std::is_same_v<T, QVariantList>)
+		return pls_find_attr(object, name, recursion, std::optional<QJsonValue::Type>(QJsonValue::Array)).value_or(QJsonArray::fromVariantList(defval)).toArray().toVariantList();
+	else if constexpr (std::is_same_v<T, QVariantMap>)
+		return pls_find_attr(object, name, recursion, std::optional<QJsonValue::Type>(QJsonValue::Object)).value_or(QJsonObject::fromVariantMap(defval)).toObject().toVariantMap();
+	else if constexpr (std::is_same_v<T, QVariantHash>)
+		return pls_find_attr(object, name, recursion, std::optional<QJsonValue::Type>(QJsonValue::Object)).value_or(QJsonObject::fromVariantHash(defval)).toObject().toVariantHash();
+	else if constexpr (std::is_same_v<T, QJsonArray>)
+		return pls_find_attr(object, name, recursion, std::optional<QJsonValue::Type>(QJsonValue::Array)).value_or(defval).toArray();
+	else if constexpr (std::is_same_v<T, QJsonObject>)
+		return pls_find_attr(object, name, recursion, std::optional<QJsonValue::Type>(QJsonValue::Object)).value_or(defval).toObject();
+	else if constexpr (std::is_same_v<T, QJsonValue>)
+		return pls_find_attr(object, name, recursion, std::optional<QJsonValue::Type>(QJsonValue::Object)).value_or(defval);
+}
+template<typename T> T pls_to_spec(const QJsonValue &value, const T &defval = T())
+{
+	static_assert(
+		pls::is_any_of_v<T, bool, QString, QStringList, float, double, qint32, quint32, qint64, quint64, QVariant, QVariantList, QVariantMap, QVariantHash, QJsonArray, QJsonObject, QJsonValue>,
+		"invalid json value type");
+	if constexpr (std::is_same_v<T, bool>)
+		return value.toBool(defval);
+	else if constexpr (std::is_same_v<T, QString>)
+		return value.toString(defval);
+	else if constexpr (std::is_same_v<T, QStringList>)
+		return pls_to_string_list(value.toArray());
+	else if constexpr (std::is_floating_point_v<T>)
+		return value.toDouble();
+	else if constexpr (std::is_integral_v<T>)
+		return value.toInteger();
+	else if constexpr (std::is_same_v<T, QVariant>)
+		return value.toVariant();
+	else if constexpr (std::is_same_v<T, QVariantList>)
+		return value.toArray().toVariantList();
+	else if constexpr (std::is_same_v<T, QVariantMap>)
+		return value.toObject().toVariantMap();
+	else if constexpr (std::is_same_v<T, QVariantHash>)
+		return value.toObject().toVariantHash();
+	else if constexpr (std::is_same_v<T, QJsonArray>)
+		return value.toArray();
+	else if constexpr (std::is_same_v<T, QJsonObject>)
+		return value.toObject();
+	else if constexpr (std::is_same_v<T, QJsonValue>)
+		return value;
+}
+template<typename T> T pls_get_attr(const QJsonObject &object, const QString &name, const T &defval = T())
+{
+	if (auto attr = pls_get_attr(object, name); attr)
+		return pls_to_spec<T>(attr.value(), defval);
+	return defval;
+}
+template<typename T> T pls_get_attr(const QJsonObject &object, const QStringList &names, const T &defval = T(), qsizetype from = 0, qsizetype n = -1)
+{
+	if (auto attr = pls_get_attr(object, names, from, n); attr)
+		return pls_to_spec<T>(attr.value(), defval);
+	return defval;
+}
+
+template<typename T> T pls_get_attr(const QJsonValue &json, const pls_attr_name_t &name, const T &defval = T())
+{
+	if (auto attr = pls_get_attr(json, name); attr)
+		return pls_to_spec<T>(attr.value(), defval);
+	return defval;
+}
+template<typename T> QList<T> pls_get_attrs(const QJsonValue &json, const pls_attr_name_t &name, const T &defval = T())
+{
+	QList<T> results;
+	for (auto i : pls_get_attrs(json, name))
+		results.append(pls_to_spec<T>(i, defval));
+	return results;
+}
+template<typename T> T pls_get_attr(const QJsonValue &json, const QList<pls_attr_name_t> &names, const T &defval = T(), qsizetype from = 0, qsizetype n = -1)
+{
+	if (auto attr = pls_get_attr(json, names, from, n); attr)
+		return pls_to_spec<T>(attr.value(), defval);
+	return defval;
+}
+template<typename T> QList<T> pls_get_attrs(const QJsonValue &json, const QList<pls_attr_name_t> &names, const T &defval = T(), qsizetype from = 0, qsizetype n = -1)
+{
+	QList<T> results;
+	for (auto i : pls_get_attrs(json, names, from, n))
+		results.append(pls_to_spec<T>(i, defval));
+	return results;
+}
+
+template<typename Fn> auto pls_get_attr(const QVariantHash &attrs, const QString &name, Fn fn) -> std::optional<std::invoke_result_t<Fn, QVariant>>
+{
+	if (auto val = pls_get_attr(attrs, name); val)
+		return fn(val.value());
+	return std::nullopt;
+}
+template<typename Fn> auto pls_get_attr(const QVariantMap &attrs, const QString &name, Fn fn) -> std::optional<std::invoke_result_t<Fn, QVariant>>
+{
+	if (auto val = pls_get_attr(attrs, name); val)
+		return fn(val.value());
+	return std::nullopt;
+}
+template<typename Fn> auto pls_get_attr(const QVariantHash &attrs, const QStringList &names, Fn fn, qsizetype from = 0, qsizetype n = -1) -> std::optional<std::invoke_result_t<Fn, QVariant>>
+{
+	if (auto val = pls_get_attr(attrs, names, from, n); val)
+		return fn(val.value());
+	return std::nullopt;
+}
+template<typename Fn> auto pls_get_attr(const QVariantMap &attrs, const QStringList &names, Fn fn, qsizetype from = 0, qsizetype n = -1) -> std::optional<std::invoke_result_t<Fn, QVariant>>
+{
+	if (auto val = pls_get_attr(attrs, names, from, n); val)
+		return fn(val.value());
+	return std::nullopt;
+}
+
+#define PLS_GET_ATTR_STRING_CB(...) [](const QVariant &val) { return __VA_ARGS__(val.toString()); }
+#define PLS_GET_ATTR_URL_CB() [](const QVariant &val) { return val.toUrl(); }
 
 struct pls_list_t {
 	pls_list_t *prev;
@@ -1639,5 +2191,10 @@ template<typename T, typename V> inline void pls_set_value(T *ptr, const V &valu
 		*ptr = value;
 	}
 }
+LIBUTILSAPI_API bool pls_open_url(const QString &url);
+
+LIBUTILSAPI_API bool pls_lens_needs_reboot();
+
+LIBUTILSAPI_API std::optional<bool> pls_check_version(const QByteArray &expression, const QVersionNumber &version);
 
 #endif // _PRISM_COMMON_LIBUTILSAPI_LIBUTILSAPI_H

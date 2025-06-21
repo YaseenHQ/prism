@@ -13,6 +13,8 @@
 #include <qscrollbar.h>
 #include <pls-shared-functions.h>
 #include <QFontMetrics>
+#include <QDesktopServices>
+#include "PLSPlatformApi.h"
 
 #define DESCICONPATH QStringLiteral(":/resource/images/add-source-view/ic-addsource-%1.%2")
 #define APNGPATHWITHLANG QStringLiteral(":/resource/images/add-source-view/%1_%2.%3")
@@ -29,6 +31,8 @@ constexpr auto NEWICONWIDTH = 34;
 constexpr auto ITEMMAXHEIGHT = 58;
 constexpr auto ITEMMINHEIGHT = 40;
 constexpr auto OTHERHEIGHT = 20;
+constexpr auto ITEMTEXTLAYOUTRIGHTMARGIN = 5;
+
 using namespace common;
 extern QString GetIconKey(obs_icon_type type);
 extern bool isNewSource(const QString &id);
@@ -55,17 +59,19 @@ PLSAddSourceItem::PLSAddSourceItem(const QString &id, const QString &displayName
 	} else {
 		m_iconKey = GetIconKey(obs_source_get_icon_type(id.toUtf8().constData())).toLower();
 	}
+	m_newLabel = pls_new<QLabel>(this);
+	m_newLabel->setVisible(false);
+	m_newLabel->setObjectName("label_status");
+	m_newLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
 
-	ui->label_status->setVisible(isNew);
 	connect(this, &QPushButton::toggled, this, &PLSAddSourceItem::statusChanged);
-	connect(this, &QPushButton::toggled, this, [this, isNew]() { calculateLabelWidth(isNew); });
+	connect(this, &QPushButton::toggled, this, [this, isNew](bool isChecked) { calculateLabelWidth(isNew, isChecked); });
 	QPixmap pix = OBSBasic::Get()->GetSourcePixmap(id, false);
 	ui->label_icon->setPixmap(pix);
 	ui->label_icon->setAttribute(Qt::WA_TransparentForMouseEvents);
 	ui->label_text->setAttribute(Qt::WA_TransparentForMouseEvents);
-	ui->label_status->setAttribute(Qt::WA_TransparentForMouseEvents);
 	QMetaObject::invokeMethod(
-		this, [isNew, this]() { calculateLabelWidth(isNew); }, Qt::QueuedConnection);
+		this, [isNew, this]() { calculateLabelWidth(isNew, false); }, Qt::QueuedConnection);
 }
 
 PLSAddSourceItem::~PLSAddSourceItem()
@@ -98,20 +104,34 @@ QScrollArea *PLSAddSourceItem::getScrollArea()
 	return m_scrollArea;
 }
 
-void PLSAddSourceItem::calculateLabelWidth(bool isNew)
+void PLSAddSourceItem::calculateLabelWidth(bool isNew, bool isChecked)
 {
+	ui->horizontalLayout_2->setContentsMargins(0, 0, isNew ? m_newLabel->width() + ITEMTEXTLAYOUTRIGHTMARGIN : ITEMTEXTLAYOUTRIGHTMARGIN, 0);
+
 	QFontMetrics fontWidth(ui->label_text->font());
 	auto availableWidth = this->frameSize().width() - PADDING - ICONWIDTH - MARGIN;
 	if (isNew) {
 		availableWidth -= NEWICONWIDTH;
 	}
+
+	availableWidth -= isChecked ? 5 : 0;
+
 	if (fontWidth.horizontalAdvance(ui->label_text->text()) > availableWidth) {
-		this->setFixedHeight(ITEMMAXHEIGHT);
 		ui->label_text->setWordWrap(true);
+		this->setFixedHeight(ITEMMAXHEIGHT);
+
 	} else {
 		ui->label_text->setWordWrap(false);
 		this->setFixedHeight(ITEMMINHEIGHT);
 	}
+	auto textRec = fontWidth.boundingRect(QRect(0, 0, availableWidth, ITEMMAXHEIGHT), Qt::TextWordWrap, ui->label_text->text());
+	m_newLabel->move(textRec.width() + ICONWIDTH + PADDING + MARGIN, (this->height() - m_newLabel->height()) / 2);
+	m_newLabel->setVisible(isNew);
+}
+
+void PLSAddSourceView::openSourceLink()
+{
+	QDesktopServices::openUrl(QUrl(m_openLink));
 }
 
 void PLSAddSourceItem::statusChanged(bool isChecked)
@@ -139,6 +159,11 @@ PLSAddSourceView::PLSAddSourceView(QWidget *parent) : PLSDialogView(parent)
 	connect(&m_buttonGroup, QOverload<QAbstractButton *>::of(&QButtonGroup::buttonClicked), this, &PLSAddSourceView::sourceItemChanged);
 	connect(ui->buttonOK, &QPushButton::clicked, this, &PLSAddSourceView::okHandler);
 	connect(ui->buttonCancel, &QPushButton::clicked, [this]() { PLSAddSourceView::done(Rejected); });
+	connect(ui->scrollArea->verticalScrollBar(), &QScrollBar::valueChanged, [this](int value) {
+		if (value >= ui->scrollArea->verticalScrollBar()->maximum()) {
+			ui->frame_baseSource->repaint();
+		}
+	});
 	ui->buttonOK->setEnabled(m_buttonGroup.checkedButton() != nullptr);
 	initSourceItems();
 	ui->scrollArea->verticalScrollBar()->isVisible() ? ui->verticalLayout_baseSource->setContentsMargins(11, 0, 4, 0) : ui->verticalLayout_baseSource->setContentsMargins(11, 0, 13, 0);
@@ -150,6 +175,14 @@ PLSAddSourceView::PLSAddSourceView(QWidget *parent) : PLSDialogView(parent)
 	ui->horizontalLayout_2->insertWidget(1, ui->buttonCancel);
 #endif
 	ui->verticalLayout_4->setAlignment(ui->label_descContent, Qt::AlignTop);
+
+	connect(ui->buttonTip, &QPushButton::clicked, this, &PLSAddSourceView::openSourceLink);
+
+	m_openLink = pls_is_equal(pls_prism_get_locale().toUtf8().constData(), "ko-KR")
+			     ? "https://blog.naver.com/prismlivestudio/223402286811"
+			     : "https://medium.com/prismlivestudio/windows-guide-guide-for-using-spout2-capture-source-in-prism-live-studio-54b0a72241eb";
+
+	ui->buttonTip->setVisible(false);
 }
 
 PLSAddSourceView::~PLSAddSourceView()
@@ -186,6 +219,12 @@ void PLSAddSourceView::initSourceItems()
 			} else {
 				displayName = pls_source_get_display_name(cid.constData());
 			}
+			if (pls_is_equal(cid.constData(), PRISM_CHZZK_SPONSOR_SOURCE_ID)) {
+				auto list = PLS_PLATFORM_API->getExistedPlatformsByType(PLSServiceType::ST_CHZZK);
+				if (list.empty()) {
+					continue;
+				}
+			}
 			m_buttonGroup.addButton(new PLSAddSourceItem(id, displayName));
 		}
 	}
@@ -209,6 +248,8 @@ void PLSAddSourceView::initSourceItems()
 
 	for (auto button : m_buttonGroup.buttons()) {
 		auto item = static_cast<PLSAddSourceItem *>(button);
+		if (item->itemId() == PRISM_CHAT_SOURCE_ID)
+			continue;
 		if (item) {
 			if (item->itemId().contains("prism") && !(item->itemId() == PRISM_MONITOR_SOURCE_ID || item->itemId() == PRISM_REGION_SOURCE_ID)) {
 				ui->verticalLayout_prismSource->addWidget(item);
@@ -231,10 +272,14 @@ void PLSAddSourceView::sourceItemChanged(QAbstractButton *button)
 	ui->buttonOK->setEnabled(true);
 	auto item = static_cast<PLSAddSourceItem *>(button);
 	item->getScrollArea()->ensureWidgetVisible(button);
+	ui->buttonTip->setVisible(item->itemIconKey() == "spout2");
 	setSourceDesc(button);
 }
 void PLSAddSourceView::okHandler()
 {
+	if (selectSourceId() == PRISM_CHZZK_SPONSOR_SOURCE_ID && !PLSBasic::instance()->bSuccessGetChzzkSourceUrl(this)) {
+		return;
+	}
 	done(Accepted);
 }
 extern int getSourceDisplayType(const QString &id);
@@ -273,25 +318,33 @@ void PLSAddSourceView::setSourceDesc(QAbstractButton *button)
 		ui->label_descPic->setVisible(true);
 		QSize size = {100, 100};
 		QString suffix = "svg";
-		QPixmap pix;
 		ui->label_descPic->setFixedSize(size);
 		margin.setBottom(170);
 		if (0 == key.compare("bgm", Qt::CaseInsensitive)) {
 			margin.setBottom(184);
 			size = {250, 71};
 			suffix = "png";
-			pix.load(QString(DESCICONPATH).arg(key).arg(suffix));
-			pix = pix.scaled(size * 3, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 			ui->label_descPic->setFixedSize(size);
 		} else if (0 == key.compare("default", Qt::CaseInsensitive)) {
 			suffix = "png";
-			pix.load(QString(DESCICONPATH).arg(key).arg(suffix));
-			pix = pix.scaled(size * 3, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-		} else {
-			loadPixmap(pix, QString(DESCICONPATH).arg(key).arg(suffix), size * 4);
 		}
+		QString imagePath = QString(DESCICONPATH).arg(key).arg(suffix);
+		pls_async_invoke([pthis = pls::QObjectPtr<PLSAddSourceView>(this), imagePath, size, suffix]() {
+			if (!pthis.valid())
+				return;
 
-		ui->label_descPic->setPixmap(pix);
+			QPixmap image;
+			if (suffix == "svg") {
+				loadPixmap(image, imagePath, size * 4);
+			} else {
+				image.load(imagePath);
+				image = image.scaled(size * 3, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+			}
+
+			pls_async_call(pthis, [pthis, image]() { //
+				pthis->ui->label_descPic->setPixmap(image);
+			});
+		});
 	} else if (descType == 1) {
 		QString suffix = "png";
 		QString format = "APNG";
@@ -308,6 +361,11 @@ void PLSAddSourceView::setSourceDesc(QAbstractButton *button)
 			size = {152, 220};
 			ui->label_descGif->setFixedSize(size);
 			margin.setBottom(102);
+		} else if (key == "chzzksponsor") {
+			suffix = "gif";
+			format = "GIF";
+			size = {224, 126};
+			ui->label_descGif->setFixedSize(size);
 		}
 		ui->label_descGif->setVisible(true);
 		ui->label_descPic->setVisible(false);

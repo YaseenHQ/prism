@@ -23,7 +23,6 @@
 #include "PLSBasic.h"
 #include "login-user-info.hpp"
 #include "prism-version.h"
-#include "PLSResourceManager.h"
 #ifdef _WIN32
 #include <Windows.h>
 #include "PLSDumpAnalyzer.h"
@@ -33,6 +32,7 @@
 #include "PLSLaunchWizardView.h"
 #include "PLSGuideTipsframe.h"
 #include "platform.hpp"
+#include "PLSMotionDefine.h"
 
 #include <QProxyStyle>
 #include <QScreen>
@@ -52,10 +52,17 @@
 #include "PLSPlatformPrism.h"
 #include "log/log.h"
 #include <libutils-api.h>
-
 #include "PLSPrismShareMemory.h"
 #include "PLSSyncServerManager.hpp"
 #include "pls/pls-obs-api.h"
+#include <libresource.h>
+#include "PLSSceneTemplateResourceMgr.h"
+#include "PLSTestTools.hpp"
+#include "PLSLoginDataHandler.h"
+
+#ifdef ENABLE_TEST
+#include "TestCase.h"
+#endif
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "dbghelp.lib")
@@ -307,6 +314,9 @@ static QString getExceptionAlertString(init_exception_code code)
 	case init_exception_code::failed_fasoo_reason:
 		alertString = "Failed to initialize, fasoo reason.";
 		break;
+	case init_exception_code::prism_already_running:
+		alertString = "prism is already running.";
+		break;
 	default:
 		break;
 	}
@@ -458,6 +468,7 @@ public:
 	}
 };
 #endif
+
 PLSApp::PLSApp(int &argc, char **argv, profiler_name_store_t *store) : OBSApp(argc, argv, store)
 {
 	// force modify current work directory
@@ -490,6 +501,9 @@ PLSApp::PLSApp(int &argc, char **argv, profiler_name_store_t *store) : OBSApp(ar
 
 PLSApp::~PLSApp()
 {
+	pls_set_app_exiting(true);
+	pls_set_obs_exiting(true);
+
 #ifdef _WIN32
 	CoUninitialize();
 #endif
@@ -507,33 +521,35 @@ void PLSApp::AppInit()
 	if (!openConfig(cookieConfig, "PRISMLiveStudio/Cache/cookies.ini")) {
 		PLS_ERROR(MAINFRAME_MODULE, "cookies  init error");
 	}
-	
+
 	PLS_SYNC_SERVER_MANAGE;
 	PLS_PLATFORM_API;
 	PLS_PLATFORM_PRSIM; // zhangdewen singleton init
-	
-	QVariantHash hash;
-	hash.insert("gcc", GlobalVars::gcc.c_str());
-	PLSResourceManager::setParams(hash);
+
+	// set scene template desgin mode flag for libobs
+	bool supportExportTemplates = pls_prism_get_qsetting_value("SupportExportTemplates", false).toBool();
+	pls_set_design_mode(supportExportTemplates);
+
+	//add scene templates custom font database
+	QString path = QString(SCENE_TEMPLATE_DIR).append("custom_font/");
+	auto customFontPath = pls_get_user_path(path);
+	pls_add_custom_font(customFontPath);
 
 	//add custom font database
 	auto fontPath = pls_get_app_data_dir("PRISMLiveStudio") + "/textmotion/web/static/fonts";
-	QDir dir(fontPath);
-	auto fileInfoList = dir.entryInfoList({"*.ttf", "*.otf"}, QDir::Files, QDir::Name);
-	for (auto fileInfo : fileInfoList) {
-		QFontDatabase::addApplicationFont(fileInfo.absoluteFilePath());
-	}
+	pls_add_custom_font(fontPath);
+	//add custom chatv2 font database
+#if defined(Q_OS_WIN)
+	QString chatV2FontPath = pls_get_app_dir() + QString("/../../data/prism-plugins/prism-chatv2-source/fonts");
+#elif defined(Q_OS_MACOS)
+	QString chatV2FontPath = pls_get_dll_dir("prism-chatv2-source") + "/fonts";
+#endif
+	pls_add_custom_font(chatV2FontPath);
 }
 
 bool PLSApp::PLSInit()
 {
-	QFileInfo fileInfo(pls_get_user_path(PRISM_TM_TEMPLATE_WEB_PATH));
-	if (!fileInfo.exists()) {
-		PLSResourceManager::instance()->copyTextmotionWeb();
-	}
-	auto resourceMgr = PLSResourceManager::instance();
-	resourceMgr->startCheckResource();
-
+	PLSLoginDataHandler::instance()->initCustomChannelObj();
 	if (!OBSApp::OBSInit()) {
 		return false;
 	}
@@ -634,39 +650,15 @@ void PLSApp::setAnalogBaseInfo(QJsonObject &obj, bool isUploadHardwareInfo)
 	obj.insert("envOsVer", getOsVersion());
 
 	if (isUploadHardwareInfo) {
-		obj.insert("envCpu", GlobalVars::prism_cpuName.c_str());
+		obj.insert("envCpu", pls_get_cpu_name().c_str());
 		obj.insert("envGpu", GlobalVars::videoAdapter.c_str());
 		obj.insert("envMem", QString("%1MB").arg(os_get_sys_total_size() / 1024 / 1024));
-		obj.insert("envDxVer", QString(GlobalVars::cur_dx_version.c_str()));
 	}
 }
 
-void PLSApp::uploadAnalogInfo(const QString &apiPath, const QVariantMap &paramInfos, bool isUploadHardwareInfo)
-{
-	QJsonDocument doc;
-	QJsonObject obj;
-	setAnalogBaseInfo(obj, isUploadHardwareInfo);
-	for (auto paramIter = paramInfos.constBegin(); paramIter != paramInfos.constEnd(); ++paramIter) {
-		auto value = paramIter.value();
-		if (value.typeId() == QMetaType::QStringList) {
-			obj.insert(paramIter.key(), value.toStringList().join(';'));
-		} else {
-			obj.insert(paramIter.key(), QJsonValue::fromVariant(paramIter.value()));
-		}
-	}
-	doc.setObject(obj);
-	PLSPlatformPrism::instance()->uploadStatus(apiPath, doc.toJson());
-}
+void PLSApp::uploadAnalogInfo(const QString &apiPath, const QVariantMap &paramInfos, bool isUploadHardwareInfo) {}
 
-void PLSApp::uploadChatWidgetAnalogInfo(int styleId, int fontSize)
-{
-}
-
-void PLSApp::uploadTextMotionAnalogInfo(int templateId, const QString &fontColor, const QString &fontFamily, int motion, int motionSpeed)
-{
-	}
-
-void PLSApp::backupSceneCollectionConfig() const
+void PLSApp::backupGolbalConfig() const
 {
 	ConfigFile backupGlobalConfig;
 	if (!openConfig(backupGlobalConfig, "PRISMLiveStudio/global.bak")) {
@@ -676,6 +668,12 @@ void PLSApp::backupSceneCollectionConfig() const
 
 	const char *sceneCollectionName = config_get_string(App()->GlobalConfig(), "Basic", "SceneCollection");
 	const char *sceneCollectionFile = config_get_string(App()->GlobalConfig(), "Basic", "SceneCollectionFile");
+
+	bool isDontShow = config_get_bool(App()->GlobalConfig(), common::LAUNCHER_CONFIG, common::CONFIG_DONTSHOW);
+	config_set_bool(backupGlobalConfig, common::LAUNCHER_CONFIG, common::CONFIG_DONTSHOW, isDontShow);
+
+	auto displayVer = config_get_bool(App()->GlobalConfig(), common::NEWFUNCTIONTIP_CONFIG, common::CONFIG_DISPLAYVERISON);
+	config_set_bool(backupGlobalConfig, common::NEWFUNCTIONTIP_CONFIG, common::CONFIG_DISPLAYVERISON, displayVer);
 
 	config_set_string(backupGlobalConfig, "Basic", "SceneCollection", sceneCollectionName);
 	config_set_string(backupGlobalConfig, "Basic", "SceneCollectionFile", sceneCollectionFile);
@@ -725,7 +723,7 @@ bool PLSApp::event(QEvent *event)
 
 void PLSApp::sessionExpiredhandler() const
 {
-	pls_alert_error_message(PLSBasic::instance()->getMainView(), tr("Alert.Title"), tr("main.message.prism.login.session.expired"));
+	PLSAlertView::information(PLSBasic::instance()->getMainView(), tr("Alert.Title"), tr("main.message.prism.login.session.expired"));
 	pls_prism_change_over_login_view();
 }
 
@@ -742,14 +740,12 @@ bool PLSApp::eventFilter(QObject *obj, QEvent *event)
 	}
 #endif // DEBUG
 
-
-
 	auto mo = obj->metaObject();
 	if (mo->inherits(&QComboBox::staticMetaObject) || mo->inherits(&QPushButton::staticMetaObject) || mo->inherits(&QToolButton::staticMetaObject) || mo->inherits(&QCheckBox::staticMetaObject) ||
-	    mo->inherits(&QRadioButton::staticMetaObject) || mo->inherits(&QSlider::staticMetaObject) || mo->inherits(&QListWidget::staticMetaObject) || mo->inherits(&PLSComboBox::staticMetaObject) ||
-	    mo->inherits(&QMenu::staticMetaObject) || mo->inherits(&PLSComboBoxListView::staticMetaObject) || mo->inherits(&QSpinBox::staticMetaObject) ||
-	    mo->inherits(&SilentUpdateCheckBox::staticMetaObject) || mo->inherits(&PLSElideCheckBox::staticMetaObject) || mo->inherits(&QTabBar::staticMetaObject) ||
-	    obj->property("showHandCursor").toBool()) {
+	    mo->inherits(&PLSCheckBox::staticMetaObject) || mo->inherits(&QRadioButton::staticMetaObject) || mo->inherits(&QSlider::staticMetaObject) || mo->inherits(&QListWidget::staticMetaObject) ||
+	    mo->inherits(&PLSComboBox::staticMetaObject) || mo->inherits(&QMenu::staticMetaObject) || mo->inherits(&PLSComboBoxListView::staticMetaObject) ||
+	    mo->inherits(&QSpinBox::staticMetaObject) || mo->inherits(&SilentUpdateCheckBox::staticMetaObject) || mo->inherits(&PLSElideCheckBox::staticMetaObject) ||
+	    mo->inherits(&QTabBar::staticMetaObject) || obj->property("showHandCursor").toBool()) {
 		//#1795, when click close button to close dialog, when window deacitve, maybe trigger QEvent::Enter after deactive window.
 		if (static_cast<QWidget *>(obj)->isVisible() && event->type() == QEvent::Enter) {
 			static_cast<QWidget *>(obj)->setCursor(Qt::PointingHandCursor);
@@ -794,7 +790,6 @@ int PLSApp::runProgram(PLSApp &program, int argc, char *argv[], ScopeProfiler &p
 				PLSPrismShareMemory::sendFilePathToSharedMemeory(pscPath);
 			}
 
-			PLSApp::uploadAnalogInfo(RUNAPP_API_PATH, {{SUCCESSFAIL, false}, {FAILREASON, "app is already running."}}, true);
 			SetEvent(hEvent);
 			CloseHandle(hEvent);
 			throw init_exception_code::prism_already_running;
@@ -804,14 +799,13 @@ int PLSApp::runProgram(PLSApp &program, int argc, char *argv[], ScopeProfiler &p
 		bool already_running = pls_check_mac_app_is_existed(eventName);
 		if (already_running) {
 			PLS_INFO("app/singleton", "app is already running. isFromLauncher");
-			PLSApp::uploadAnalogInfo(RUNAPP_API_PATH, {{SUCCESSFAIL, false}, {FAILREASON, "app is already running."}}, true);
 			pls_activiate_mac_app_except_self();
+			pls::mac::sendPrismActiveSignal();
 			throw init_exception_code::prism_already_running;
 		}
 
 		const auto &obsVersion = pls_get_installed_obs_version();
 		PLS_INIT_INFO(MAINFRAME_MODULE, obsVersion.isEmpty() ? "The installed obs studio app not founded%s" : "The installed obs studio app version is %s", obsVersion.toUtf8().constData());
-
 #endif
 
 		removeConfig(QString("PRISMLiveStudio/user/%1.png").arg(PLSLoginUserInfo::getInstance()->getAuthType()).toUtf8().constData());
@@ -850,15 +844,37 @@ int PLSApp::runProgram(PLSApp &program, int argc, char *argv[], ScopeProfiler &p
 			CloseHandle(hEvent);
 		});
 #elif defined(Q_OS_MACOS)
-// TODO: - mac >>> launcher
+		pls::mac::notifyPrismActiveSignal([]() {
+			PLS_INFO(MAINFRAME_MODULE, "Other software attempts to wake up PRISM by remote notification");
+			pls_check_app_exiting();
+			if (PLSMainView::instance() && OBSBasic::Get()) {
+				PLS_INFO(MAINFRAME_MODULE, "PRISM set showing by remote notification");
+				OBSBasic::Get()->SetShowing(true);
+			}
+		});
 #endif
 		program.setAppRunning(true);
 
-		PLSApp::uploadAnalogInfo(RUNAPP_API_PATH, {{SUCCESSFAIL, true}}, true);
 
 		GuideRegisterManager::instance()->beginShow();
 
 		doLogBlacklistSoftware("PrismStarted");
+
+		pls_async_call_mt([&program, argc, argv]() {
+			pls_add_tools_menu_seperator();
+			pls_init_test_tools();
+
+#ifdef ENABLE_TEST
+			tests::genFileName();
+			if (GlobalVars::unitTest) {
+				GlobalVars::unitTestExitCode = tests::run(argc, argv);
+				program.getMainView()->close();
+			} else {
+				tests::show(argc, argv);
+			}
+#endif
+		});
+
 		return PLSApp::exec();
 
 	} catch (init_exception_code code) {
@@ -868,7 +884,6 @@ int PLSApp::runProgram(PLSApp &program, int argc, char *argv[], ScopeProfiler &p
 		QString codeStr = getExceptionAlertString(code);
 		PLS_LOGEX(PLS_LOG_ERROR, MAINFRAME_MODULE, {{"launchFailed", QString("0x%1%2").arg(static_cast<int>(code), 0, 16).arg(pls_get_init_exit_code_str(code)).toUtf8().constData()}},
 			  "failed to initialize, %s", codeStr.toUtf8().constData());
-		PLSApp::uploadAnalogInfo(RUNAPP_API_PATH, {{SUCCESSFAIL, false}, {FAILREASON, codeStr}}, true);
 		pls_set_app_exiting(true);
 		pls_set_obs_exiting(true);
 
@@ -878,23 +893,29 @@ int PLSApp::runProgram(PLSApp &program, int argc, char *argv[], ScopeProfiler &p
 		QString codeStr = getExceptionAlertString(code);
 		PLS_LOGEX(PLS_LOG_ERROR, MAINFRAME_MODULE, {{"launchFailed", QString("0x%1%2").arg(static_cast<int>(code), 0, 16).arg(pls_get_init_exit_code_str(code)).toUtf8().constData()}},
 			  "failed to initialize, unknown exception catched");
-		PLSApp::uploadAnalogInfo(RUNAPP_API_PATH, {{SUCCESSFAIL, false}, {FAILREASON, "unknown exception"}}, true);
 		pls_set_app_exiting(true);
 		pls_set_obs_exiting(true);
 
-		// deal prism disappear by catched unknown exception when main view was already displayed to the screen
-		if (!pls_is_main_window_closing()) {
-			auto mainview = pls_get_main_view();
-			auto basic = PLSBasic::instance();
-			if (mainview && basic) {
-				QEventLoop eventLoop;
-				QObject::connect(basic, &PLSBasic::mainCloseFinished, [&eventLoop]() { eventLoop.quit(); });
-				mainview->close();
-				eventLoop.exec();
-			}
-		}
 		doLogBlacklistSoftware("PrismInitFailed");
-
+		pls_process_terminate(static_cast<int>(code));
 		return static_cast<int>(code);
+	}
+}
+
+void PLSApp::generatePrismSessionAndSubSession(int argc, char *argv[])
+{
+	for (int i = 1; i < argc; i++) {
+		QString argument = argv[i];
+		if (argument.startsWith(shared_values::k_launcher_command_log_prism_session)) {
+			GlobalVars::prismSession = argument.remove(0, QString(shared_values::k_launcher_command_log_prism_session).size()).toStdString();
+		} else if (argument.startsWith(shared_values::k_launcher_command_log_sub_prism_session)) {
+			GlobalVars::prismSubSession = argument.remove(0, QString(shared_values::k_launcher_command_log_sub_prism_session).size()).toStdString();
+		}
+	}
+	if (GlobalVars::prismSession.empty()) {
+		GlobalVars::prismSession = QUuid::createUuid().toString().toStdString();
+	}
+	if (GlobalVars::prismSubSession.empty()) {
+		GlobalVars::prismSubSession = QUuid::createUuid().toString().toStdString();
 	}
 }

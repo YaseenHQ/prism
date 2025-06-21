@@ -61,11 +61,33 @@
 #include "PLSEdit.h"
 #include "PLSGetPropertiesThread.h"
 #include "PLSCommonFunc.h"
+#include "PLSAlertView.h"
+#include "pls/pls-source.h"
+#include "pls-net-url.hpp"
 
 using namespace std;
 
 #define PROPERTY_FLAG_BUTTON_WIDTH_FIXED 1 << 4
 constexpr auto MAX_TM_TEXT_CONTENT_LENGTH = 200;
+
+class PLSWidgetInfoControlNotify {
+public:
+	explicit PLSWidgetInfoControlNotify(PLSWidgetInfo *watcher_) : m_watcher(watcher_)
+	{
+		if (m_watcher) {
+			m_watcher->setIsControlChanging(true);
+		}
+	}
+	~PLSWidgetInfoControlNotify()
+	{
+		if (m_watcher) {
+			m_watcher->setIsControlChanging(false);
+		}
+	};
+
+private:
+	QPointer<PLSWidgetInfo> m_watcher;
+};
 
 void PLSPropertiesView::AddProperty(obs_property_t *property, QFormLayout *layout)
 {
@@ -117,7 +139,7 @@ void PLSPropertiesView::AddProperty(obs_property_t *property, QFormLayout *layou
 		AddTmTemplateTab(property, layout);
 		break;
 	case PLS_PROPERTY_TM_TEMPLATE_LIST: //OBS_PROPERTY_TM_TEMPLATE_LIST:
-		AddTmTabTemplateList(property, layout);
+		pls_is_equal(getSourceId(), common::PRISM_CHATV2_SOURCE_ID) ? AddCtTabTemplateList(property, layout) : AddTmTabTemplateList(property, layout);
 		break;
 	case PLS_PROPERTY_TM_DEFAULT_TEXT: //OBS_PROPERTY_TM_TEXT:
 		AddDefaultText(property, layout, label);
@@ -182,7 +204,27 @@ void PLSPropertiesView::AddProperty(obs_property_t *property, QFormLayout *layou
 	case PLS_PROPERTY_TEXT_CONTENT:
 		widget = AddTextContent(property);
 		break;
-
+	case PLS_PROPERTY_CT_DISPLAY:
+		AddCtDisplay(property, layout, label);
+		break;
+	case PLS_PROPERTY_CT_OPTIONS:
+		AddCtOptions(property, layout, label);
+		break;
+	case PLS_PROPERTY_CT_MOTION:
+		AddCtMotion(property, layout, label);
+		break;
+	case PLS_PROPERTY_CT_FONT:
+		AddCtFont(property, layout, label);
+		break;
+	case PLS_PROPERTY_CT_TEXT_COLOR:
+		AddCtTextColor(property, layout, label);
+		break;
+	case PLS_PROPERTY_CT_BK_COLOR:
+		AddCtBkColor(property, layout, label);
+		break;
+	case PLS_PROPERTY_CHZZK_SPONSOR:
+		AddChzzkSponsor(property, layout);
+		break;
 	default:
 		Q_ASSERT_X(false, "AddProperty()", "new type need add ui by self");
 		break;
@@ -592,6 +634,7 @@ void PLSPropertiesView::AddChatTemplateList(obs_property_t *prop, QFormLayout *l
 	if (!obs_frontend_streaming_active()) {
 		const char *longDesc = obs_property_long_description(prop);
 		QLabel *descLabel = pls_new<QLabel>(QString::fromUtf8(longDesc && longDesc[0] ? longDesc : ""));
+		descLabel->setWordWrap(true);
 		descLabel->setObjectName("chatTemplateList_descLabel");
 		hlayout1->addWidget(descLabel, 1);
 	}
@@ -706,18 +749,22 @@ void PLSPropertiesView::AddTmTab(obs_property_t *prop, QFormLayout *layout)
 	bool audioVisualizer = false;
 	bool isTimerSource = false;
 	bool isViewerCountSource = false;
-
+	bool ischatTemplateSource = false;
 	const char *id = getSourceId();
 	if (id && id[0]) {
 		audioVisualizer = !strcmp(id, common::PRISM_SPECTRALIZER_SOURCE_ID);
 		isTimerSource = !strcmp(id, common::PRISM_TIMER_SOURCE_ID);
 		isViewerCountSource = pls_is_equal(id, common::PRISM_VIEWER_COUNT_SOURCE_ID);
+		ischatTemplateSource = pls_is_equal(id, common::PRISM_CHATV2_SOURCE_ID);
 	}
 	if (isTimerSource) {
 		tabFrame->setProperty("height_timer", true);
 	}
 
 	QStringList tabList = {QTStr("textmotion.select.template"), QTStr("textmotion.detailed.settings")};
+	if (ischatTemplateSource) {
+		tabList = {QTStr("ChatTemplate.Select.Theme"), QTStr("ChatTemplate.Function"), QTStr("ChatTemplate.FontandColor.Settings")};
+	}
 	auto buttonGroup = pls_new<QButtonGroup>();
 	for (int index = 0; index != tabList.count(); ++index) {
 		auto button = pls_new<QPushButton>();
@@ -758,6 +805,9 @@ void PLSPropertiesView::AddTmTab(obs_property_t *prop, QFormLayout *layout)
 
 void PLSPropertiesView ::AddTmTemplateTab(obs_property_t *prop, QFormLayout *layout)
 {
+	if (pls_is_equal(getSourceId(), PRISM_CHATV2_SOURCE_ID)) {
+		m_ctHelper->initTemplateButtons();
+	}
 	const char *name = obs_property_name(prop);
 	auto tabIndex = (int)obs_data_get_int(settings, name);
 	obs_property_t *propNext = prop;
@@ -767,9 +817,12 @@ void PLSPropertiesView ::AddTmTemplateTab(obs_property_t *prop, QFormLayout *lay
 	if (isNext) {
 		nextName = obs_property_name(propNext);
 		templateTabIndex = (int)obs_data_get_int(settings, nextName);
-		auto defaultInde = m_tmHelper->getDefaultTemplateId();
-		if (templateTabIndex == 0 && templateTabIndex != defaultInde) {
-			templateTabIndex = defaultInde;
+		auto defaultIndex = m_tmHelper->getDefaultTemplateId();
+		if (pls_is_equal(getSourceId(), common::PRISM_CHATV2_SOURCE_ID)) {
+			defaultIndex = m_ctHelper->getDefaultTemplateId();
+		}
+		if (templateTabIndex == 0 && templateTabIndex != defaultIndex) {
+			templateTabIndex = defaultIndex;
 		}
 	}
 	if (tabIndex < 0 || templateTabIndex < 0) {
@@ -785,14 +838,25 @@ void PLSPropertiesView ::AddTmTemplateTab(obs_property_t *prop, QFormLayout *lay
 	hLayout->setSpacing(0);
 	hLayout->setContentsMargins(0, 0, 0, 0);
 	hLayout->setSpacing(10);
-	hLayout->setContentsMargins(16, 0, 10, 0);
-	hLayout->setAlignment(Qt::AlignLeft);
+	if (pls_is_equal(getSourceId(), common::PRISM_CHATV2_SOURCE_ID)) {
+		hLayout->setContentsMargins(0, 0, 10, 0);
+	} else {
+		hLayout->setContentsMargins(16, 0, 10, 0);
+	}
 	tabFrame->setLayout(hLayout);
 
 	auto buttonGroup = pls_new<QButtonGroup>();
-	const QStringList &templateList = m_tmHelper->getTemplateNameList();
+	auto templateList = m_tmHelper->getTemplateNameList();
 	auto templateCount = static_cast<int>(templateList.count());
 	QString selectTemplateStr = m_tmHelper->findTemplateGroupStr(templateTabIndex);
+	QString tabTips;
+
+	if (pls_is_equal(getSourceId(), common::PRISM_CHATV2_SOURCE_ID)) {
+		templateList = m_ctHelper->getTemplateNameList();
+		templateCount = static_cast<int>(templateList.count());
+		selectTemplateStr = m_ctHelper->findTemplateGroupStr(templateTabIndex);
+		tabTips = QObject::tr("ChatTemplate.Template.Tab.Tips");
+	}
 	if (selectTemplateStr.isEmpty()) {
 		selectTemplateStr = templateList.value(tabIndex);
 	}
@@ -811,8 +875,22 @@ void PLSPropertiesView ::AddTmTemplateTab(obs_property_t *prop, QFormLayout *lay
 		} else {
 			button->setChecked(0 == templateList.value(index).compare(selectTemplateStr, Qt::CaseInsensitive));
 		}
-		hLayout->addWidget(button);
+		hLayout->addWidget(button, Qt::AlignLeft);
 	}
+	auto tabTipsLabel = pls_new<QLabel>(tabTips);
+	tabTipsLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+	tabTipsLabel->setObjectName("PLSChatTemplateTabTips");
+	if (IS_ENGLISH() || IS_KR()) {
+		tabTipsLabel->setWordWrap(false);
+	} else {
+		tabTipsLabel->setWordWrap(true);
+	}
+#ifdef Q_OS_MACOS
+	tabTipsLabel->setWordWrap(true);
+#endif
+	hLayout->addWidget(tabTipsLabel);
+	hLayout->setAlignment(tabTipsLabel, Qt::AlignRight | Qt::AlignCenter);
+	tabTipsLabel->setVisible(pls_is_equal(getSourceId(), common::PRISM_CHATV2_SOURCE_ID));
 
 	auto gLayout = pls_new<QGridLayout>();
 	gLayout->setSpacing(12);
@@ -848,9 +926,9 @@ void PLSPropertiesView::AddTmTabTemplateList(obs_property_t *prop, QFormLayout *
 	if (tabIndex < 0) {
 		return;
 	}
-	auto defaultInde = m_tmHelper->getDefaultTemplateId();
-	if (tabIndex == 0 && tabIndex != defaultInde) {
-		tabIndex = defaultInde;
+	auto defaultIndex = m_tmHelper->getDefaultTemplateId();
+	if (tabIndex == 0 && tabIndex != defaultIndex) {
+		tabIndex = defaultIndex;
 	}
 	QString selectTemplateStr = m_tmHelper->findTemplateGroupStr(tabIndex);
 	if (selectTemplateStr.isEmpty()) {
@@ -875,7 +953,7 @@ void PLSPropertiesView::AddTmTabTemplateList(obs_property_t *prop, QFormLayout *
 		}
 	}
 }
-static QStringList getFilteredFontFamilies()
+QStringList PLSPropertiesView::getFilteredFontFamilies()
 {
 	auto families = QFontDatabase::families();
 #if defined(Q_OS_MACOS)
@@ -887,6 +965,7 @@ static QStringList getFilteredFontFamilies()
 		}
 	}
 #endif
+
 	return families;
 }
 void PLSPropertiesView::AddTmText(obs_property_t *prop, QFormLayout *layout, QLabel *&label)
@@ -1125,7 +1204,7 @@ void PLSPropertiesView::AddTmColor(obs_property_t *prop, QFormLayout *layout, QL
 		auto textColorLayout = pls_new<QHBoxLayout>();
 		textColorLayout->setContentsMargins(0, 0, 0, 0);
 		textColorLayout->setSpacing(20);
-		auto textColorLabel = pls_new<QLabel>(QTStr("textmotion.text"));
+		auto textColorLabel = pls_new<QLabel>(QTStr("TextMotion.Text"));
 		textColorLabel->setObjectName("subLabel");
 		glayout->addWidget(textColorLabel, insetRow, 0);
 		m_tmLabels.append(textColorLabel);
@@ -1555,8 +1634,8 @@ void PLSPropertiesView::AddVirtualBackgroundResource(obs_property_t *prop, QBoxL
 
 			auto *wi = pls_new<PLSWidgetInfo>(this, prop, widget_);
 			connect(widget_, SIGNAL(checkState(bool)), wi, SLOT(VirtualBackgroundResourceMotionDisabledChanged(bool)));
-			connect(widget_, SIGNAL(currentResourceChanged(QString, int, QString, QString, QString, bool, QString, QString, int)), wi,
-				SLOT(VirtualBackgroundResourceSelected(QString, int, QString, QString, QString, bool, QString, QString, int)));
+			connect(widget_, SIGNAL(currentResourceChanged(QString, int, QString, QString, QString, bool, QString, QString)), wi,
+				SLOT(VirtualBackgroundResourceSelected(QString, int, QString, QString, QString, bool, QString, QString)));
 			connect(widget_, SIGNAL(deleteCurrentResource(QString)), wi, SLOT(VirtualBackgroundResourceDeleted(QString)));
 			connect(widget_, SIGNAL(removeAllMyResource(QStringList)), wi, SLOT(VirtualBackgroundMyResourceDeleteAll(QStringList)));
 			children.emplace_back(wi);
@@ -1585,7 +1664,7 @@ QWidget *PLSPropertiesView::AddSwitch(obs_property_t *prop, QFormLayout *layout)
 
 	hlayout->addWidget(checkbox, 0, Qt::AlignLeft | Qt::AlignVCenter);
 
-	NewWidget(prop, checkbox, SIGNAL(toggled(bool)));
+	NewWidget(prop, checkbox, &PLSCheckBox::toggled);
 
 	return widget;
 }
@@ -1727,7 +1806,7 @@ void PLSPropertiesView::AddFontSimple(obs_property_t *prop, QFormLayout *layout,
 
 	QMetaObject::invokeMethod(
 		fontCbx,
-		[family, fontCbx]() {
+		[family, fontCbx, this]() {
 			QSignalBlocker block(fontCbx);
 			fontCbx->clear();
 			fontCbx->addItems(getFilteredFontFamilies());
@@ -2011,6 +2090,41 @@ void PLSPropertiesView::AddColorAlphaCheckbox(obs_property_t *prop, QFormLayout 
 	children.emplace_back(info);
 }
 
+void PLSPropertiesView::AddCtTabTemplateList(obs_property_t *prop, QFormLayout *layout)
+{
+	const char *name = obs_property_name(prop);
+	auto tabIndex = (int)obs_data_get_int(settings, name);
+	if (tabIndex < 0) {
+		return;
+	}
+	auto defaultIndex = m_ctHelper->getDefaultTemplateId();
+	if (tabIndex == 0 && tabIndex != defaultIndex) {
+		tabIndex = defaultIndex;
+	}
+	QString selectTemplateStr = m_ctHelper->findTemplateGroupStr(tabIndex);
+	if (selectTemplateStr.isEmpty()) {
+		selectTemplateStr = m_ctHelper->getTemplateNameList().value(tabIndex);
+	}
+	auto buttonGroup = m_ctHelper->getTemplateButtons(selectTemplateStr);
+
+	if (buttonGroup) {
+		m_ctHelper->resetButtonStyle();
+		auto button = buttonGroup->button(tabIndex);
+		if (button) {
+			button->setChecked(true);
+		}
+	}
+	QMap<int, QString> templateNames = m_ctHelper->getTemplateNames();
+	for (auto templateName : templateNames.keys()) {
+		auto templateTabGroup = m_ctHelper->getTemplateButtons(templateNames.value(templateName).toLower());
+		if (templateTabGroup) {
+			auto wi = pls_new<PLSWidgetInfo>(this, prop, templateTabGroup);
+			connect(templateTabGroup, QOverload<int>::of(&QButtonGroup::idClicked), wi, &PLSWidgetInfo::ControlChanged);
+			children.emplace_back(wi);
+		}
+	}
+}
+
 void PLSPropertiesView::ReloadPropertiesByBool(bool refreshProperties)
 {
 	if (!reloadCallback)
@@ -2042,15 +2156,27 @@ void PLSPropertiesView::ReloadProperties()
 		if (obj) {
 			//PRISM/xiewei/20230802/uiblock/enumerate video devices in work thread.
 			auto source = pls_get_source_by_pointer_address(obj);
-
 			if ((source && 0 == strcmp(obs_source_get_id(source), OBS_DSHOW_SOURCE_ID)) || isPrismLensOrMobileSource()) {
 
 				disconnect(PLSGetPropertiesThread::Instance(), nullptr, this, nullptr);
 				ShowLoading();
+#if defined(Q_OS_WINDOWS)
+				/* issue #3024, check if enum thread was blocked every 2s. */
+				QPointer<QTimer> timer = pls_new<QTimer>();
+				timer->setInterval(2000);
+				connect(timer, &QTimer::timeout, this, &PLSPropertiesView::CheckEnumTimeout);
+				connect(
+					PLSGetPropertiesThread::Instance(), &PLSGetPropertiesThread::OnProperties, this,
+					[this, timer](PropertiesParam_t param) {
+						if (param.id == (uint64_t)this && param.properties) {
+							if (timer)
+								timer->deleteLater();
+#else
 				connect(
 					PLSGetPropertiesThread::Instance(), &PLSGetPropertiesThread::OnProperties, this,
 					[this](PropertiesParam_t param) {
 						if (param.id == (uint64_t)this && param.properties) {
+#endif
 							HideLoading();
 							properties.reset(param.properties);
 
@@ -2062,6 +2188,9 @@ void PLSPropertiesView::ReloadProperties()
 					},
 					Qt::QueuedConnection);
 				PLSGetPropertiesThread::Instance()->GetPropertiesBySource(source, (uint64_t)this);
+#if defined(Q_OS_WINDOWS)
+				timer->start();
+#endif
 				return;
 			} else
 				properties.reset(reloadCallback(obj));
@@ -2079,6 +2208,11 @@ void PLSPropertiesView::ReloadProperties()
 
 void PLSPropertiesView::RefreshProperties()
 {
+	if (isControlChanging) {
+		PLS_ERROR(PROPERTY_MODULE, "This is fatal. The property window in the UI control is refreshed in the method stack of the UI click event. Source ID: %s", getSourceId());
+		isControlChanging = false;
+		assert(false);
+	}
 	if (pls_is_and(m_tmHelper, m_tmTabChanged, pls_is_equal(getSourceId(), PRISM_TEXT_TEMPLATE_ID))) {
 		m_tmTabChanged = false;
 		m_tmHelper->initTemplateButtons();
@@ -2128,13 +2262,6 @@ PLSPropertiesView::PLSPropertiesView(OBSData settings, obs_object_t *obj_, Prope
 {
 }
 
-PLSPropertiesView::PLSPropertiesView(OBSData settings, void *obj_, PropertiesReloadCallback reloadCallback_, PropertiesUpdateCallback callback_, PropertiesVisualUpdateCb cb_, int minSize_,
-				     int maxSize_, bool showFiltersBtn_, bool showColorFilterPath_, bool colorFilterOriginalPressed_, bool refreshProperties_, bool reloadPropertyOnInit_)
-	: PLSPropertiesView(nullptr, settings, obj_, reloadCallback_, callback_, cb_, minSize_, maxSize_, showFiltersBtn_, showColorFilterPath_, colorFilterOriginalPressed_, refreshProperties_,
-			    reloadPropertyOnInit_)
-{
-}
-
 PLSPropertiesView::PLSPropertiesView(const QWidget *parent, OBSData settings, obs_object_t *obj_, PropertiesReloadCallback reloadCallback_, PropertiesUpdateCallback callback_,
 				     PropertiesVisualUpdateCb cb_, int minSize_, int maxSize_, bool showFiltersBtn_, bool showColorFilterPath_, bool colorFilterOriginalPressed_,
 				     bool refreshProperties_, bool reloadPropertyOnInit_)
@@ -2142,10 +2269,18 @@ PLSPropertiesView::PLSPropertiesView(const QWidget *parent, OBSData settings, ob
 	  maxSize(maxSize_),
 	  showColorFilterPath(showColorFilterPath_),
 	  colorFilterOriginalPressed(colorFilterOriginalPressed_),
-	  m_tmHelper(pls_get_text_motion_template_helper_instance())
+	  m_tmHelper(pls_get_text_motion_template_helper_instance()),
+	  m_ctHelper(pls_get_chat_template_helper_instance())
 {
 	pls_unused(parent);
 	setInitData(showFiltersBtn_, refreshProperties_, reloadPropertyOnInit_);
+}
+
+PLSPropertiesView::PLSPropertiesView(OBSData settings, void *obj_, PropertiesReloadCallback reloadCallback_, PropertiesUpdateCallback callback_, PropertiesVisualUpdateCb cb_, int minSize_,
+				     int maxSize_, bool showFiltersBtn_, bool showColorFilterPath_, bool colorFilterOriginalPressed_, bool refreshProperties_, bool reloadPropertyOnInit_)
+	: PLSPropertiesView(nullptr, settings, obj_, reloadCallback_, callback_, cb_, minSize_, maxSize_, showFiltersBtn_, showColorFilterPath_, colorFilterOriginalPressed_, refreshProperties_,
+			    reloadPropertyOnInit_)
+{
 }
 
 PLSPropertiesView::PLSPropertiesView(const QWidget *parent, OBSData settings, void *obj_, PropertiesReloadCallback reloadCallback_, PropertiesUpdateCallback callback_, PropertiesVisualUpdateCb cb_,
@@ -2154,7 +2289,8 @@ PLSPropertiesView::PLSPropertiesView(const QWidget *parent, OBSData settings, vo
 	  maxSize(maxSize_),
 	  showColorFilterPath(showColorFilterPath_),
 	  colorFilterOriginalPressed(colorFilterOriginalPressed_),
-	  m_tmHelper(pls_get_text_motion_template_helper_instance())
+	  m_tmHelper(pls_get_text_motion_template_helper_instance()),
+	  m_ctHelper(pls_get_chat_template_helper_instance())
 {
 	pls_unused(parent);
 	setInitData(showFiltersBtn_, refreshProperties_, reloadPropertyOnInit_);
@@ -2162,25 +2298,29 @@ PLSPropertiesView::PLSPropertiesView(const QWidget *parent, OBSData settings, vo
 
 PLSPropertiesView::PLSPropertiesView(OBSData settings, const char *type, PropertiesReloadCallback reloadCallback, int minSize_, int maxSize_, bool showFiltersBtn_, bool showColorFilterPath_,
 				     bool colorFilterOriginalPressed_, bool refreshProperties_, bool reloadPropertyOnInit_)
-	: OBSPropertiesView(settings, type, reloadCallback, minSize_),
-	  maxSize(maxSize_),
-	  showColorFilterPath(showColorFilterPath_),
-	  colorFilterOriginalPressed(colorFilterOriginalPressed_),
-	  m_tmHelper(pls_get_text_motion_template_helper_instance())
+	: PLSPropertiesView(nullptr, settings, type, reloadCallback, minSize_, maxSize_, showFiltersBtn_, showColorFilterPath_, colorFilterOriginalPressed_, refreshProperties_, reloadPropertyOnInit_)
 {
-	setInitData(showFiltersBtn_, refreshProperties_, reloadPropertyOnInit_);
 }
 
 PLSPropertiesView::PLSPropertiesView(OBSBasicSettings *basicSettings, OBSData settings, const char *type, PropertiesReloadCallback reloadCallback, int minSize_, int maxSize_, bool showFiltersBtn_,
-				     bool showColorFilterPath_, bool colorFilterOriginalPressed_, bool refreshProperties_, bool reloadPropertyOnInit_)
-	: OBSPropertiesView(settings, type, reloadCallback, minSize_),
+				     bool showColorFilterPath_, bool colorFilterOriginalPressed_, bool refreshProperties_, bool reloadPropertyOnInit_, bool bChzzkKeyframeTip, bool bFromSetting)
+	: OBSPropertiesView(settings, type, reloadCallback, minSize_, bFromSetting),
 	  maxSize(maxSize_),
 	  showColorFilterPath(showColorFilterPath_),
 	  colorFilterOriginalPressed(colorFilterOriginalPressed_),
 	  m_tmHelper(pls_get_text_motion_template_helper_instance()),
-	  m_basicSettings(basicSettings)
+	  m_basicSettings(basicSettings),
+	  m_ctHelper(pls_get_chat_template_helper_instance()),
+	  m_bChzzkKeyframeTip(bChzzkKeyframeTip)
 {
 	setInitData(showFiltersBtn_, refreshProperties_, reloadPropertyOnInit_);
+}
+
+PLSPropertiesView::~PLSPropertiesView()
+{
+	if (pls_is_equal(getSourceId(), PRISM_CHATV2_SOURCE_ID)) {
+		m_ctHelper->clearChatTemplateButton();
+	}
 }
 
 void PLSPropertiesView::setInitData(bool showFiltersBtn_, bool refreshProperties_, bool reloadPropertyOnInit_)
@@ -2192,6 +2332,9 @@ void PLSPropertiesView::setInitData(bool showFiltersBtn_, bool refreshProperties
 	if (!pls_is_equal(getSourceId(), OBS_DSHOW_SOURCE_ID) && !isPrismLensOrMobileSource()) {
 		if (reloadPropertyOnInit_)
 			ReloadPropertiesByBool(refreshProperties_);
+	}
+	if (pls_is_equal(getSourceId(), PRISM_CHATV2_SOURCE_ID)) {
+		m_ctHelper->initTemplateButtons();
 	}
 }
 
@@ -2319,6 +2462,31 @@ void PLSPropertiesView::ResetProperties(obs_properties_t *newProperties)
 	deferUpdate = (flags & OBS_PROPERTIES_DEFER_UPDATE) != 0;
 }
 
+#if defined(Q_OS_WINDOWS)
+void PLSPropertiesView::CheckEnumTimeout()
+{
+	std::array<wchar_t, 128> buffer{};
+	auto result = pls_get_enum_timeout_device(buffer.data(), buffer.size());
+	if (result) {
+		std::wstring deviceName(buffer.data());
+		auto timer = qobject_cast<QTimer *>(sender());
+		if (timer) {
+			timer->stop();
+			timer->deleteLater();
+		}
+		pls_async_call(this, [this, deviceName]() {
+			std::array<char, 512> deviceUtf8 = {0};
+			os_wcs_to_utf8(deviceName.c_str(), 0, deviceUtf8.data(), deviceUtf8.size());
+			PLSUIFunc::showEnumTimeoutAlertView(QString::fromUtf8(deviceUtf8.data()));
+			if (auto toplevel = pls_get_toplevel_view(this); toplevel) {
+				pls_notify_close_modal_views();
+				toplevel->close();
+			}
+		});
+	}
+}
+#endif
+
 void PLSPropertiesView::creatColorList(obs_property_t *prop, QGridLayout *&gLayout, int index, const long long colorValue, const QString &colorList)
 {
 	auto hLayout = pls_new<QHBoxLayout>();
@@ -2347,7 +2515,7 @@ void PLSPropertiesView::creatColorList(obs_property_t *prop, QGridLayout *&gLayo
 }
 
 void PLSPropertiesView::createTMSlider(obs_property_t *prop, int propertyValue, int minVal, int maxVal, int stepVal, int val, QHBoxLayout *&hLayout, bool isSuffix, bool, bool isShowSliderIcon,
-				       const QString &sliderName)
+				       const QString &sliderName, int indexOffset)
 {
 	auto sliderLayout = pls_new<QHBoxLayout>();
 	sliderLayout->setSpacing(6);
@@ -2364,7 +2532,7 @@ void PLSPropertiesView::createTMSlider(obs_property_t *prop, int propertyValue, 
 	}
 	auto slider = pls_new<SliderIgnoreScroll>();
 	slider->setObjectName("slider");
-	slider->setProperty("index", propertyValue);
+	slider->setProperty("index", propertyValue + indexOffset);
 	slider->setMinimum(minVal);
 	slider->setMaximum(maxVal);
 	slider->setPageStep(stepVal);
@@ -2378,7 +2546,7 @@ void PLSPropertiesView::createTMSlider(obs_property_t *prop, int propertyValue, 
 	}
 	auto spinBox = pls_new<PLSSpinBox>();
 	spinBox->setObjectName("spinBox");
-	spinBox->setProperty("index", propertyValue);
+	spinBox->setProperty("index", propertyValue + indexOffset);
 	spinBox->setRange(minVal, maxVal);
 	spinBox->setSingleStep(stepVal);
 	spinBox->setValue(val);
@@ -2443,6 +2611,7 @@ void PLSPropertiesView::createTMColorCheckBox(PLSCheckBox *&controlCheckBox, obs
 	bkLabelLalyout->setSpacing(6);
 	bkLabelLalyout->setContentsMargins(0, 0, 0, 0);
 	auto bkLabel = pls_new<QLabel>(labelName);
+	bkLabel->setWordWrap(true);
 	bkLabel->setObjectName("bk_outlineLabel");
 	auto bkColorCheck = pls_new<TMCheckBox>();
 	controlCheckBox = bkColorCheck;
@@ -2462,7 +2631,8 @@ void PLSPropertiesView::createTMColorCheckBox(PLSCheckBox *&controlCheckBox, obs
 	frame->setLayout(bkLabelLalyout);
 }
 
-void PLSPropertiesView::createColorButton(obs_property_t *prop, QGridLayout *&gLayout, const PLSCheckBox *checkBox, const QString &opationName, int index, bool isSuffix, bool)
+void PLSPropertiesView::createColorButton(obs_property_t *prop, QGridLayout *&gLayout, const PLSCheckBox *checkBox, const QString &opationName, int index, bool isSuffix, bool isEnable,
+					  int indexOffset)
 {
 	const char *name = obs_property_name(prop);
 	obs_data_t *val = obs_data_get_obj(settings, name);
@@ -2471,6 +2641,9 @@ void PLSPropertiesView::createColorButton(obs_property_t *prop, QGridLayout *&gL
 	auto layoutIndex = index;
 	if (index > 0) {
 		layoutIndex = isColor ? index : index - 1;
+	}
+	if (pls_is_equal(getSourceId(), PRISM_CHATV2_SOURCE_ID)) {
+		layoutIndex = index;
 	}
 	auto button = pls_new<QPushButton>();
 	button->setObjectName("textColorBtn");
@@ -2491,7 +2664,7 @@ void PLSPropertiesView::createColorButton(obs_property_t *prop, QGridLayout *&gL
 	bool isAlaph;
 	long long colorValue = 0;
 	int alaphValue = 0;
-	getTmColor(val, index, isControlOn, colorControl, colorValue, isAlaph, alaphValue);
+	getTmColor(val, index, isControlOn, colorControl, colorValue, isAlaph, alaphValue, indexOffset);
 	setLabelColor(colorLabel, colorValue, alaphValue);
 
 	auto info = pls_new<PLSWidgetInfo>(this, prop, colorLabel);
@@ -2502,9 +2675,9 @@ void PLSPropertiesView::createColorButton(obs_property_t *prop, QGridLayout *&gL
 	opationLabel->setObjectName("sliderLabel");
 	gLayout->addWidget(opationLabel, layoutIndex, 2);
 
-	int minVal = pls_property_tm_text_min(prop, PLS_PROPERTY_TM_COLOR);
-	int maxVal = pls_property_tm_text_max(prop, PLS_PROPERTY_TM_COLOR);
-	int stepVal = pls_property_tm_text_step(prop, PLS_PROPERTY_TM_COLOR);
+	int minVal = 0;
+	int maxVal = 100;
+	int stepVal = 1;
 
 	if (2 == index) {
 		//outline slider value
@@ -2513,16 +2686,37 @@ void PLSPropertiesView::createColorButton(obs_property_t *prop, QGridLayout *&gL
 		stepVal = 1;
 		alaphValue = static_cast<int>(obs_data_get_int(val, "outline-color-line"));
 	}
+	bool hasOutLineValue = obs_data_has_default_value(val, "chatFontOutlineSize") || obs_data_has_user_value(val, "chatFontOutlineSize");
+
+	if (hasOutLineValue) {
+		minVal = 0;
+		maxVal = 4;
+		stepVal = 1;
+		alaphValue = static_cast<int>(obs_data_get_int(val, "chatFontOutlineSize"));
+	}
+	bool hasSingValue = obs_data_has_user_value(val, "chatSingleBkAlpha") || obs_data_has_default_value(val, "chatSingleBkAlpha");
+	if (hasSingValue && index == 0) {
+		alaphValue = static_cast<int>(obs_data_get_int(val, "chatSingleBkAlpha"));
+	}
+	bool hasTotalValue = obs_data_has_user_value(val, "chatTotalBkAlpha") || obs_data_has_default_value(val, "chatTotalBkAlpha");
+	if (hasTotalValue && index == 1) {
+		alaphValue = static_cast<int>(obs_data_get_int(val, "chatTotalBkAlpha"));
+	}
+
 	auto sliderHLayout = pls_new<QHBoxLayout>();
 	sliderHLayout->setSpacing(20);
 	sliderHLayout->setContentsMargins(0, 0, 0, 0);
 	gLayout->addLayout(sliderHLayout, layoutIndex, 3);
-	createTMSlider(prop, index, minVal, maxVal, stepVal, alaphValue, sliderHLayout, isSuffix, isControlOn, false);
+	createTMSlider(prop, index, minVal, maxVal, stepVal, alaphValue, sliderHLayout, isSuffix, isControlOn, false, QString(), indexOffset);
 
 	bool enabled = checkBox ? checkBox->isChecked() : isControlOn;
 	setLayoutEnable(layout, enabled);
 	setLayoutEnable(sliderHLayout, enabled);
 	opationLabel->setEnabled(enabled);
+	if (pls_is_equal(getSourceId(), PRISM_CHATV2_SOURCE_ID) && pls_is_equal(name, "Chat.Font") && obs_data_get_int(settings, "Chat.Template.List") % 10 == 3) {
+		setLayoutEnable(sliderHLayout, colorControl);
+		opationLabel->setEnabled(colorControl);
+	}
 
 	if (checkBox) {
 		connect(checkBox, &PLSCheckBox::clicked, [this, layout, opationLabel, sliderHLayout](bool isChecked) {
@@ -2549,15 +2743,23 @@ void PLSPropertiesView::setLabelColor(QLabel *label, const long long colorValue,
 	pls_flush_style(label);
 }
 
-void PLSPropertiesView::getTmColor(obs_data_t *textData, int tabIndex, bool &isControlOn, bool &isColor, long long &color, bool &isAlaph, int &alaph) const
+void PLSPropertiesView::getTmColor(obs_data_t *textData, int tabIndex, bool &isControlOn, bool &isColor, long long &color, bool &isAlaph, int &alaph, int indexOffset) const
 {
-	switch (tabIndex) {
+	switch (tabIndex + indexOffset) {
 	case 0:
-		isColor = obs_data_get_bool(textData, "is-color");
-		isControlOn = true;
-		color = obs_data_get_int(textData, "text-color");
-		isAlaph = obs_data_get_bool(textData, "is-text-color-alpha");
-		alaph = static_cast<int>(obs_data_get_int(textData, "text-color-alpha"));
+		if (pls_is_equal(getSourceId(), PRISM_CHATV2_SOURCE_ID)) {
+			isControlOn = obs_data_get_bool(textData, "isEnableChatFontOutlineColor");
+			isColor = obs_data_get_bool(textData, "isEnableChatFontOutlineSize");
+			color = obs_data_get_int(textData, "chatFontOutlineColor");
+			isAlaph = true;
+			alaph = static_cast<int>(obs_data_get_int(textData, "chatFontOutlineSize"));
+		} else {
+			isColor = obs_data_get_bool(textData, "is-color");
+			isControlOn = true;
+			color = obs_data_get_int(textData, "text-color");
+			isAlaph = obs_data_get_bool(textData, "is-text-color-alpha");
+			alaph = static_cast<int>(obs_data_get_int(textData, "text-color-alpha"));
+		}
 		return;
 	case 1:
 		isControlOn = obs_data_get_bool(textData, "is-bk-color-on");
@@ -2572,6 +2774,20 @@ void PLSPropertiesView::getTmColor(obs_data_t *textData, int tabIndex, bool &isC
 		color = obs_data_get_int(textData, "outline-color");
 		isAlaph = true;
 		alaph = static_cast<int>(obs_data_get_int(textData, "outline-color-line"));
+		return;
+	case 5:
+		isControlOn = obs_data_get_bool(textData, "isCheckChatSingleBkColor");
+		isColor = obs_data_get_bool(textData, "isEnableChatSingleBkColor");
+		color = obs_data_get_int(textData, "chatSingleBkColor");
+		isAlaph = true;
+		alaph = static_cast<int>(obs_data_get_int(textData, "chatSingleBkAlpha"));
+		return;
+	case 6:
+		isControlOn = obs_data_get_bool(textData, "isCheckChatTotalBkColor");
+		isColor = obs_data_get_bool(textData, "isEnableChatTotalBkColor");
+		color = obs_data_get_int(textData, "chatTotalBkColor");
+		isAlaph = true;
+		alaph = static_cast<int>(obs_data_get_int(textData, "chatTotalBkAlpha"));
 		return;
 	default:
 		break;
@@ -2627,7 +2843,6 @@ void PLSPropertiesView::createRadioButton(const int buttonCount, obs_data_t *tex
 				button->setText(buttonObjs.value(index));
 			}
 		}
-
 		group->addButton(button, index);
 		hLayout->addWidget(button);
 	}
@@ -2699,28 +2914,67 @@ void PLSPropertiesView::updateTMTemplateButtons(const int, const QString &templa
 	const QLayoutItem *child = nullptr;
 	while ((child = gLayout->takeAt(0)) != nullptr) {
 		QWidget *w = child->widget();
-		w->setParent(nullptr);
+		if (w) {
+			w->setParent(nullptr);
+		}
 	}
 	auto buttonGroup = m_tmHelper->getTemplateButtons(templateTabName);
+	if (pls_is_equal(getSourceId(), common::PRISM_CHATV2_SOURCE_ID)) {
+		buttonGroup = m_ctHelper->getTemplateButtons(templateTabName);
+	}
 	if (nullptr == buttonGroup) {
 		return;
 	}
 	auto buttons = buttonGroup->buttons();
+	if (buttons.count() == 0) {
+		auto frame = pls_new<QFrame>();
+		auto vlayout = pls_new<QVBoxLayout>(frame);
+		vlayout->setAlignment(Qt::AlignHCenter);
+		auto label = pls_new<QLabel>();
+		label->setAlignment(Qt::AlignCenter);
+		label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+		label->setObjectName("ct_empty_tip_label");
+		label->setText(tr("ChatTemplate.Custom.Empty.Default"));
+		vlayout->addItem(new QSpacerItem(0, 110, QSizePolicy::Expanding, QSizePolicy::Expanding));
+		vlayout->addWidget(label);
+		vlayout->addItem(new QSpacerItem(0, 110, QSizePolicy::Expanding, QSizePolicy::Expanding));
+		gLayout->addWidget(frame);
+		return;
+	}
 	for (int index = 0; index != buttons.count(); ++index) {
 		auto button = buttons.value(index);
+		if (!button)
+			continue;
+		auto ctButton = dynamic_cast<ChatTemplate *>(button);
+		if (ctButton) {
+			connect(ctButton, &ChatTemplate::resetSourceProperties, this, &PLSPropertiesView::removeCustomChatTemplate, Qt::QueuedConnection);
+		}
 		int Id = button->property("ID").toInt();
 		buttonGroup->setId(button, Id);
 		gLayout->addWidget(button, index / 4, (index % 4));
-		pls_template_button_refresh_gif_geometry(button);
 	}
+}
+
+void PLSPropertiesView::updateCTTemplateButtons(const int templateTabIndex, const QString &tempalteTabName, QGridLayout *glayout)
+{
+	//theme and my
 }
 
 void PLSPropertiesView::updateFontSytle(const QString &family, PLSComboBox *fontStyleBox) const
 {
 	if (fontStyleBox) {
+		QSignalBlocker block(fontStyleBox);
 		fontStyleBox->clear();
 		if (!family.isEmpty()) {
-			fontStyleBox->addItems(QFontDatabase::styles(family));
+			auto familyData = family.toUtf8();
+			if (pls_is_equal(familyData.constData(), "NanumGothic") || pls_is_equal(familyData.constData(), "NanumMyeongjo")) {
+				fontStyleBox->addItems({"ExtraBold"});
+			} else if (pls_is_equal(familyData.constData(), "S-Core Dream")) {
+				fontStyleBox->addItems({"5 Medium"});
+
+			} else {
+				fontStyleBox->addItems(QFontDatabase::styles(family));
+			}
 		}
 	}
 }
@@ -2734,6 +2988,19 @@ void PLSPropertiesView::setLayoutEnable(const QLayout *layout, bool isEnable)
 		auto w = layout->itemAt(index)->widget();
 		if (w) {
 			w->setEnabled(isEnable);
+			if (w->objectName() == "colorLabel") {
+				auto text = static_cast<QLabel *>(w)->text();
+				if (!isEnable && text == "#000000")
+					text = "#363636";
+				auto style = isEnable ? QPalette::Window : QPalette::Dark;
+				auto palette = QPalette(QColor(text));
+				auto border = isEnable ? "#363636" : "#2d2d2d";
+				w->setPalette(palette);
+				w->setStyleSheet(QString("QLabel{border:solid 1px %1;font-weight: normal;background-color :%2; color: %3;}")
+							 .arg(border)
+							 .arg(palette.color(style).name(QColor::HexRgb))
+							 .arg(palette.color(QPalette::WindowText).name(QColor::HexRgb)));
+			}
 		} else {
 			setLayoutEnable(layout->itemAt(index)->layout(), isEnable);
 		}
@@ -2810,10 +3077,10 @@ QWidget *getPropertiesTopWidget(QWidget *w)
 
 void PLSPropertiesView::ShowLoading()
 {
-	auto parent = getPropertiesTopWidget(this);
+	//auto parent = getPropertiesTopWidget(this);
 
 	if (!m_loadingPage) {
-		m_loadingPage = PLSUIFunc::showLoadingView(parent, QTStr("main.camera.loading.devicelist"));
+		m_loadingPage = PLSUIFunc::showLoadingView(this, QTStr("main.camera.loading.devicelist"));
 	}
 }
 
@@ -2821,6 +3088,90 @@ void PLSPropertiesView::HideLoading()
 {
 	if (m_loadingPage)
 		delete m_loadingPage;
+}
+
+void PLSPropertiesView::removeCustomChatTemplate(int removeTemplateId)
+{
+
+	const char *id = getSourceId();
+	auto source = GetSourceObj();
+	auto sourcePtr = pls_get_source_by_pointer_address(source);
+
+	int CHzzkSourceCount = 0;
+	auto cb = [](void *param, obs_source_t *source) {
+		auto id = obs_source_get_id(source);
+		OBSDataAutoRelease settings = obs_source_get_settings(source);
+		int removeTemplateId = (*reinterpret_cast<int *>(param));
+		if (pls_is_equal(id, PRISM_CHATV2_SOURCE_ID) && obs_data_get_int(settings, "Chat.Template.List") == removeTemplateId) {
+			obs_data_clear(settings);
+		}
+		return true;
+	};
+	obs_enum_sources(cb, &removeTemplateId);
+
+	if (!DeferUpdate())
+		obs_source_update(sourcePtr, nullptr);
+	pls_source_properties_edit_start(sourcePtr);
+	OBSPropertiesView::ReloadProperties();
+}
+void PLSPropertiesView::AddChzzkSponsor(obs_property_t *prop, QFormLayout *layout)
+{
+	auto urlType = (int)obs_data_get_int(settings, "CHZZK.Sponsor.Url.Type");
+
+	auto flayout = pls_new<QFormLayout>();
+	flayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+	flayout->setHorizontalSpacing(20);
+	flayout->setVerticalSpacing(0);
+
+	auto SponsorDescribeLabel = pls_new<QLabel>(tr("CHZZKSponsor.Describe"));
+	SponsorDescribeLabel->setObjectName("CHZZKSponsorDescribe");
+	flayout->addRow(SponsorDescribeLabel);
+
+	auto SponsorNotificationLabel = pls_new<QLabel>(tr("CHZZKSponsor.Notification"));
+	SponsorNotificationLabel->setObjectName("CHZZKSponsorNotification");
+	SponsorNotificationLabel->setStyleSheet(QString("min-width:%1px;").arg(175));
+	SponsorNotificationLabel->setWordWrap(true);
+	auto hlayout = pls_new<QHBoxLayout>();
+	hlayout->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+	hlayout->setContentsMargins(0, 0, 0, 0);
+	hlayout->setSpacing(20);
+
+	auto group = pls_new<PLSRadioButtonGroup>();
+	group->setObjectName("CHZZKSponsorGroup");
+	auto frame = pls_new<QFrame>();
+	frame->setFrameStyle(QFrame::NoFrame);
+	frame->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+	frame->setLayout(hlayout);
+	frame->setObjectName("CHZZKSponsorGroupFrame");
+	createRadioButton(3, nullptr, hlayout, group, {tr("CHZZKSponsor.Chat.Sponsorship"), tr("CHZZKSponsor.Video.Sponsorship"), tr("CHZZKSponsor.Mission.Sponsorship")}, true, frame);
+	group->button(urlType)->setChecked(true);
+
+	auto wi = pls_new<PLSWidgetInfo>(this, prop, group);
+	connect(group, &PLSRadioButtonGroup::idClicked, wi, &PLSWidgetInfo::ControlChanged);
+	children.emplace_back(wi);
+
+	flayout->addItem(pls_new<QSpacerItem>(10, 20, QSizePolicy::Fixed, QSizePolicy::Fixed));
+	flayout->addRow(SponsorNotificationLabel, frame);
+
+	QWidget *newWidget = new QWidget();
+	newWidget->setObjectName("formLeftWidget");
+	QHBoxLayout *boxLayout = new QHBoxLayout(newWidget);
+	boxLayout->setContentsMargins(0, 0, 0, 0);
+	boxLayout->setAlignment(Qt::AlignLeft);
+	boxLayout->setSpacing(0);
+	PLSHelpIcon *help = new PLSHelpIcon(newWidget);
+	help->setToolTip(tr("CHZZKSponsor.Tooltip"));
+	//don't use plscheckbox ,The reason for using QCheckBox is that in css, ::indicator is used
+	auto gotoButton = pls_new<QCheckBox>(tr("CHZZKSponsor.GotoStudio"));
+	gotoButton->setLayoutDirection(Qt::RightToLeft);
+	gotoButton->setObjectName("gotoBtn");
+	connect(gotoButton, &QCheckBox::clicked, [this]() { QDesktopServices::openUrl(g_GotoChzzkStudio); });
+	boxLayout->addWidget(gotoButton);
+	boxLayout->addWidget(help);
+	flayout->addItem(pls_new<QSpacerItem>(10, 30, QSizePolicy::Fixed, QSizePolicy::Fixed));
+	flayout->addRow(newWidget);
+
+	layout->addRow(flayout);
 }
 
 void PLSWidgetInfo::UserOperation() const
@@ -2831,6 +3182,7 @@ void PLSWidgetInfo::UserOperation() const
 
 void PLSWidgetInfo::ControlChanged()
 {
+	PLSWidgetInfoControlNotify notify(this);
 	obs_property_type type = obs_property_get_type(property);
 	if ((pls_property_type)type < OBS_PROPERTY_BASE) {
 		WidgetInfo::ControlChanged();
@@ -2856,6 +3208,7 @@ void PLSWidgetInfo::ControlChanged()
 			return;
 		break;
 	case PLS_PROPERTY_BUTTON_GROUP:
+		setIsControlChanging(false);
 		ButtonGroupClicked(setting);
 		return;
 	case PLS_PROPERTY_CUSTOM_GROUP:
@@ -2920,6 +3273,27 @@ void PLSWidgetInfo::ControlChanged()
 		break;
 	case PLS_PROPERTY_COLOR_ALPHA_CHECKBOX: //OBS_PROPERTY_COLOR_ALPHA_CHECKBOX:
 		break;
+	case PLS_PROPERTY_CT_DISPLAY:
+		CTDisplayChanged(setting);
+		break;
+	case PLS_PROPERTY_CT_OPTIONS:
+		CTOptionsChanged(setting);
+		break;
+	case PLS_PROPERTY_CT_MOTION:
+		CTMotionChanged(setting);
+		break;
+	case PLS_PROPERTY_CT_FONT:
+		CTFontChanged(setting);
+		break;
+	case PLS_PROPERTY_CT_TEXT_COLOR:
+		CTTextColorChanged(setting);
+		break;
+	case PLS_PROPERTY_CT_BK_COLOR:
+		CTBkColorChanged(setting);
+		break;
+	case PLS_PROPERTY_CHZZK_SPONSOR:
+		ChzzkSponsorTypeChanged(setting);
+		break;
 	default:
 		break;
 	}
@@ -2942,7 +3316,7 @@ static QString processResourcePath(bool prismResource, const QString &resourcePa
 }
 
 void PLSWidgetInfo::VirtualBackgroundResourceSelected(const QString &itemId, int type, const QString &resourcePath, const QString &staticImgPath, const QString &thumbnailPath, bool prismResource,
-						      const QString &foregroundPath, const QString &foregroundStaticImgPath, int dataType)
+						      const QString &foregroundPath, const QString &foregroundStaticImgPath)
 {
 	Q_UNUSED(foregroundPath)
 	Q_UNUSED(foregroundStaticImgPath)
@@ -2955,7 +3329,6 @@ void PLSWidgetInfo::VirtualBackgroundResourceSelected(const QString &itemId, int
 	obs_data_set_string(view->settings, "file_path", processResourcePath(prismResource, resourcePath).toUtf8().constData());
 	obs_data_set_string(view->settings, "image_file_path", processResourcePath(prismResource, staticImgPath).toUtf8().constData());
 	obs_data_set_string(view->settings, "thumbnail_file_path", processResourcePath(prismResource, thumbnailPath).toUtf8().constData());
-	obs_data_set_int(view->settings, "category_id", dataType);
 
 	ControlChanged();
 }
@@ -3033,6 +3406,7 @@ bool PLSWidgetInfo::BoolGroupChanged(const char *setting)
 	PLS_INFO(PROPERTY_MODULE, "PropertyOperation %s: %d", setting, idx);
 
 	if (pls_property_bool_group_clicked(property, view->GetSourceObj(), idx)) {
+		setIsControlChanging(false);
 		QMetaObject::invokeMethod(view, "RefreshProperties", Qt::QueuedConnection);
 	}
 
@@ -3211,7 +3585,7 @@ void PLSWidgetInfo::TMTextTemplateListChanged(const char *setting)
 	}
 }
 
-static bool _isValidComparedObj(const QObject *obj, const char *keyStr, const QString &objName)
+bool _isValidComparedObj(const QObject *obj, const char *keyStr, const QString &objName)
 {
 	return obj->property(keyStr).isValid() && objName == obj->objectName();
 }
@@ -3439,7 +3813,14 @@ void PLSWidgetInfo::SelectRegionClicked(const char *setting)
 {
 	uint64_t max_size = pls_texture_get_max_size();
 	PLSRegionCapture *regionCapture = pls_new<PLSRegionCapture>(view);
-	connect(regionCapture, &PLSRegionCapture::selectedRegion, this, [this, regionCapture, setting](const QRect &selectedRect) {
+	QPointer<OBSPropertiesView> guader_view(view);
+	connect(regionCapture, &PLSRegionCapture::selectedRegion, this, [this, guader_view, regionCapture, setting](const QRect &selectedRect) {
+		if (pls_is_app_exiting())
+			return;
+
+		if (!guader_view)
+			return;
+
 		qInfo() << "user selected a new region=" << selectedRect;
 		if (!selectedRect.isValid()) {
 			regionCapture->deleteLater();
@@ -3453,7 +3834,7 @@ void PLSWidgetInfo::SelectRegionClicked(const char *setting)
 		obs_data_set_int(region_obj, "height", selectedRect.height());
 		obs_data_set_obj(view->settings, setting, region_obj);
 		obs_data_release(region_obj);
-		auto plsView = dynamic_cast<PLSPropertiesView *>(view);
+		auto plsView = dynamic_cast<PLSPropertiesView *>(guader_view.data());
 		assert(plsView);
 		plsView->refreshViewAfterUIChanged(property);
 		regionCapture->deleteLater();
@@ -3561,6 +3942,16 @@ void PLSWidgetInfo::templateListChanged(const char *setting)
 	}
 }
 
+void PLSWidgetInfo::ChzzkSponsorTypeChanged(const char *setting)
+{
+
+	QString objName = object->objectName();
+	if (objName == "CHZZKSponsorGroup") {
+		int checkId = static_cast<PLSRadioButtonGroup *>(object)->checkedId();
+		obs_data_set_int(view->settings, "CHZZK.Sponsor.Url.Type", checkId);
+	}
+}
+
 QWidget *PLSPropertiesView::AddTextContent(obs_property_t *prop)
 {
 	auto content = pls_property_get_text_content(prop);
@@ -3571,4 +3962,17 @@ QWidget *PLSPropertiesView::AddTextContent(obs_property_t *prop)
 	pLineEdit->setEnabled(false);
 
 	return pLineEdit;
+}
+
+void PLSPropertiesView::AddInt(obs_property_t *prop, QFormLayout *layout, QLabel **label)
+{
+	OBSPropertiesView::AddInt(prop, layout, label);
+
+	if (m_bChzzkKeyframeTip && pls_is_equal("keyint_sec", obs_property_name(prop)) && pls_is_chzzk_checked()) {
+		auto labelTips = new QLabel(tr("settings.chzzk.keyframe.force.1s"));
+		labelTips->setWordWrap(true);
+		labelTips->setStyleSheet("font-weight: normal; color: #bababa");
+		AddSpacer(obs_property_get_type(prop), layout);
+		layout->addRow(new QLabel(QString()), labelTips);
+	}
 }

@@ -1,7 +1,6 @@
 #include "PLSBgmControlsBase.h"
 #include "libutils-api.h"
 #include "libui.h"
-#include "PLSMediaSlider.h"
 #include "pls/pls-obs-api.h"
 #include "pls/pls-source.h"
 #include "pls-common-define.hpp"
@@ -84,6 +83,10 @@ void PLSBgmControlsBase::OnSourceNotify(void *data, calldata_t *params)
 		return;
 	}
 
+	if (view->GetSource() != source) {
+		return;
+	}
+
 	auto type = (int)calldata_int(params, "message");
 	auto code = (int)calldata_int(params, "sub_code");
 	if (type == OBS_SOURCE_MUSIC_STATE_CHANGED) {
@@ -91,15 +94,31 @@ void PLSBgmControlsBase::OnSourceNotify(void *data, calldata_t *params)
 		QMetaObject::invokeMethod(view, "OnMediaStateChanged", Qt::QueuedConnection, Q_ARG(obs_media_state, state));
 	} else if (type == OBS_SOURCE_MUSIC_LOOP_STATE_CHANGED) {
 		QMetaObject::invokeMethod(view, "OnMediaLoopStateChanged", Qt::QueuedConnection, Q_ARG(bool, static_cast<bool>(code)));
+	} else if (type == OBS_SOURCE_MUSIC_MODE_STATE_CHANGED) {
+		QMetaObject::invokeMethod(view, "OnMediaModeStateChanged", Qt::QueuedConnection, Q_ARG(int, code));
 	}
 }
 
 void PLSBgmControlsBase::OnMediaStateChanged(obs_media_state state)
 {
 	switch (state) {
-	case OBS_MEDIA_STATE_PLAYING:
-		SetPlayingState();
+	case OBS_MEDIA_STATE_PLAYING: {
+		OBSSource source = OBSGetStrongRef(weakSource);
+		if (!source) {
+			SetDisabledState(true);
+			return;
+		}
+		OBSDataAutoRelease settings = obs_data_create();
+		obs_data_set_string(settings, "method", "get_current_url");
+		pls_source_get_private_data(source, settings);
+		const char *url = obs_data_get_string(settings, BGM_URL);
+		if (pls_is_empty(url)) {
+			SetDisabledState(true);
+		} else {
+			SetPlayingState();
+		}
 		break;
+	}
 	case OBS_MEDIA_STATE_PAUSED:
 		SetPauseState();
 		break;

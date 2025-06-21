@@ -25,8 +25,13 @@
 #include "PLSChannelsVirualAPI.h"
 #include "frontend-api.h"
 #include "libhttp-client.h"
+#include "libresource.h"
+#include "network-state.h"
 #include "pls-channel-const.h"
+#include "pls-common-define.hpp"
 #include "pls-shared-functions.h"
+
+#include "PLSErrorHandler.h"
 
 #define ADD_CHANNELS_H(str) "Channels." #str
 
@@ -45,7 +50,10 @@
 #define TR_NAVER_SHOPPING_LIVE CHANNELS_TR(naver_shopping_live)
 #define TR_SELECT CHANNELS_TR(select)
 #define TR_CUSTOM_RTMP CHANNELS_TR(custom_rtmp)
+#define TR_CHZZK CHANNELS_TR(chzzk)
 #define TR_RTMPT_DEFAULT_TYPE CHANNELS_TR(rtmp_default_type_channels)
+
+const QString PRISM_API_SYSTEM_ERROR = "025";
 
 /***********************debug******************************/
 #ifdef QT_DEBUG
@@ -136,31 +144,15 @@ template<typename SRCType> inline QObject *convertToObejct(SRCType *srcPt)
 
 bool isVersionLessthan(const QString &leftVer, const QString &rightVer);
 
-ChannelsMap getMatchKeysInfos(const QVariantMap &keysMap);
-
-QVariantMap createDefaultChannelInfoMap(const QString &channelName, int defaultType = ChannelData::ChannelType);
+QVariantMap createDefaultChannelInfoMap(const QString &channelName, int defaultType = ChannelData::ChannelType, const QString &cmdStr = QString());
 QString createUUID();
-QString getPlatformImageFromName(const QString &channelName, const QString &prefix = "", const QString &surfix = ".*profile");
-void getComplexImageOfChannel(const QString &uuid, QString &userIcon, QString &platformIcon, const QString &prefix = "stremsetting-", const QString &surfix = "");
+QString getDynamicChannelIcon(QString &imagePath);
+QString getPlatformImageFromName(const QString &channelName, int imageType, const QString &prefix = "", const QString &surfix = ".*profile");
+void getComplexImageOfChannel(const QString &uuid, int imageType, QString &userIcon, QString &platformIcon, const QString &prefix = "stremsetting-", const QString &surfix = "");
+QString getChatIcon(const QString &channelName, int imageType, const QString &resChatIconPath);
 QString getYoutubeShareUrl(const QString &broadCastID);
 
-/*get local machine info */
-QString getHostMacAddress();
-
-/*write json array to file */
-bool writeFile(const QByteArray &array, const QString &path);
-
 void loadPixmap(QPixmap &pix, const QString &pixmapPath, const QSize &pixSize = QSize(100, 100));
-
-/* format json array and write to file */
-template<typename DataType> bool writeJsonFile(const DataType &array, const QString &path)
-{
-	QJsonDocument document(array);
-	return writeFile(document.toJson(QJsonDocument::Indented), path);
-}
-
-/* format json array */
-void formatJson(QByteArray &array);
 
 /* add srcmap to destmap */
 template<typename MapType> auto addToMap(MapType &destMap, const MapType &srcMap) -> MapType
@@ -207,6 +199,7 @@ DECLARE_ENUM_SERIALIZATION(ChannelData::ChannelUserStatus);
 DECLARE_ENUM_SERIALIZATION(ChannelData::ChannelDataType);
 DECLARE_ENUM_SERIALIZATION(ChannelData::LiveState);
 DECLARE_ENUM_SERIALIZATION(ChannelData::RecordState);
+DECLARE_ENUM_SERIALIZATION(ChannelData::ChannelDualOutput);
 
 template<typename DataType> bool saveDataXToFile(const DataType &srcData, const QString &path)
 {
@@ -251,82 +244,18 @@ private:
 	QSemaphore &mSem;
 };
 
-template<typename ReplyPt> int getReplyStatusCode(ReplyPt reply)
-{
-	return reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-}
-
-void requestStartLog(const QString &url, const QString &requestType);
-
-template<typename ReplyType> void formatNetworkLogs(ReplyType reply, const QByteArray &data)
-{
-	int code = 0;
-	auto doc = QJsonDocument::fromJson(data);
-	if (!doc.isNull()) {
-		auto obj = doc.object();
-		if (!obj.isEmpty()) {
-			code = obj.value("code").toInt();
-		}
-	}
-	QString msg = reply->url().toString() + " statusCode = " + QString::number(getReplyStatusCode(reply)) + " code = " + QString::number(code) + ".";
-	if (code != QNetworkReply::NoError) {
-		msg.prepend("http request error! url = ");
-		msg += "\n error string :" + reply->errorString();
-		PRE_LOG_MSG(msg, ERROR);
-	} else {
-		msg.prepend("http request successfull! url = ");
-		PRE_LOG_MSG(msg, INFO);
-	}
-}
-
-template<typename ReplyType> void ChannelsNetWorkPretestWithAlerts(ReplyType reply, const QByteArray &data, bool notify = true)
-{
-
-	if (!notify) {
-		return;
-	}
-
-	auto errorValue = reply->error();
-	auto statusCode = getReplyStatusCode(reply);
-	auto contentCode = getReplyContentCode(data);
-	switch (statusCode) {
-	case 401:
-		if (contentCode == 3000) {
-			PLSCHANNELS_API->prismTokenExpired();
-			return;
-		}
-		//other fallthrough
-
-	case 500:
-		if (contentCode == -1) {
-			addErrorForType(ChannelData::NetWorkErrorType::UnknownError);
-			break;
-		}
-		//other fallthrough
-	case 404:
-		if (contentCode == 9000) {
-			addErrorForType(ChannelData::NetWorkErrorType::RTMPNotExist);
-			break;
-		}
-		//other fallthrough
-	default: //other case
-		if (errorValue <= QNetworkReply::UnknownNetworkError) {
-			addErrorForType(ChannelData::NetWorkErrorType::NetWorkNoStable);
-			break;
-		}
-		addErrorForType(ChannelData::NetWorkErrorType::UnknownError);
-		break;
-	}
-
-	PLSCHANNELS_API->networkInvalidOcurred();
-}
+void ChannelsNetWorkPretestWithAlerts(const pls::http::Reply &reply, bool notify = true);
 
 QString getImageCacheFilePath();
 QString getChannelCacheFilePath();
 QString getChannelCacheDir();
 QString getTmpCacheDir();
-QString getChannelSettingsFilePath();
-const QStringList &getDefaultPlatforms();
+const QStringList getDefaultPlatforms();
+QString channleNameConvertFixPlatformName(const QString &channleName); //pandaTV -> NCB2B
+QString NCB2BConvertChannelName(const QString &name);                  // NCB2B -> pandaTV
+QString getNCB2BServiceName(const QString &name);
+QString channelNameConvertMultiLang(const QString &name);
+QStringList getChatChannelNameList(bool bAddNCPPrefix = false);
 QString guessPlatformFromRTMP(const QString &rtmpUrl);
 
 bool isPlatformOrderLessThan(const QString &left, const QString &right);
@@ -356,25 +285,6 @@ void refreshStyle(QWidget *widget);
 
 /*get elide text of widget*/
 QString getElidedText(const QWidget *widget, const QString &srcTxt, int minWidth, Qt::TextElideMode mode = Qt::ElideRight, int flag = 0);
-
-/*set a single css of widget */
-void setStyleSheetFromFile(const QString &fileStr, QWidget *wid);
-
-/* set  css of multi file for wid */
-template<typename... Args> void setStyleSheetFromFile(QWidget *wid, Args... args)
-{
-	QStringList files{args...};
-	if (!files.isEmpty()) {
-		QString styleSteets;
-		for (const QString &fileStr : files) {
-			QFile file(fileStr);
-			if (file.open(QIODevice::ReadOnly)) {
-				styleSteets.append(file.readAll() + "\n");
-			}
-		}
-		wid->setStyleSheet(styleSteets);
-	}
-}
 
 template<typename ParentType = QWidget *, typename ChildType = QWidget *> auto findParent(ChildType child) -> ParentType
 {
@@ -407,18 +317,6 @@ template<typename DestType, typename FunctionType> auto getMemberPointer(Functio
 	return *static_cast<DestType *>((reinterpret_cast<void *>(&func)));
 }
 
-bool isCacheFileMatchCurrentLang();
-
-void translateSVGText(const QString &srcPath, const QString &txt, const QString &resultTxt);
-
-template<typename... Args> void translateSVGText(const QString &txt, const QString &resultTxt, Args... args)
-{
-	QStringList files{args...};
-	for (auto &file : files) {
-		translateSVGText(file, txt, resultTxt);
-	}
-}
-
 template<typename FunType> ChannelData::TaskFun wrapFun(FunType &fun)
 {
 	return [fun](const QVariant &) { fun(); };
@@ -428,10 +326,9 @@ template<typename FunType> ChannelData::TaskFun wrapFun(FunType &fun)
 	taskMap.insert(ChannelTransactionsKeys::g_taskName, QString(__FILE__) + QString::number(__LINE__)); \
 	PLSCHANNELS_API->addTask(taskMap);
 
-void downloadUserImage(const QString &url, const QString &dirPath, const QString &Prefix = QString(), const std::function<void(const pls::http::Reply &reply)> &finish = nullptr);
-
+void downloadUserImage(const QString &url, const QString &Prefix = QString(), pls::rsm::IDownloader::ResultCb &&resultCb = nullptr);
 QString toPlatformCodeID(const QString &srcName, bool toKeepSRC = false);
 
-QVariantMap queryStringToMap(const QString &srcStr);
-
+QList<QPair<QString, QString>> initTwitchServer();
+QList<QPair<QString, QString>> getObsTwitchServer();
 #endif //CHANELCOMMONFUNCTION_H

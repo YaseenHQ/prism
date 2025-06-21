@@ -1,7 +1,7 @@
 #include "PLSFloatScrollBarScrollArea.h"
-//#include "PLSDpiHelper.h"
 #include "libutils-api.h"
 #include <QTimer>
+#include <libui.h>
 
 PLSFloatScrollBarScrollArea::PLSFloatScrollBarScrollArea(QWidget *parent) : QScrollArea(parent)
 {
@@ -9,6 +9,7 @@ PLSFloatScrollBarScrollArea::PLSFloatScrollBarScrollArea(QWidget *parent) : QScr
 	delegateScrollBar = pls_new<QScrollBar>(Qt::Vertical, this);
 	delegateScrollBar->setObjectName("flatScrollBar");
 	delegateScrollBar->installEventFilter(this);
+	pls_scroll_area_clips_to_bounds(this);
 
 	connect(this->verticalScrollBar(), &QScrollBar::valueChanged, this, &PLSFloatScrollBarScrollArea::OnVerticalScrollBarValueChanged, Qt::QueuedConnection);
 
@@ -60,7 +61,7 @@ bool PLSFloatScrollBarScrollArea::eventFilter(QObject *watcher, QEvent *e)
 {
 	if (watcher == delegateScrollBar) {
 		if (e->type() == QEvent::Show) {
-			QTimer::singleShot(0, this, &PLSFloatScrollBarScrollArea::UpdateSliderGeometry);
+			pls_async_call(this, [this]() { UpdateSliderGeometry(); });
 		}
 	}
 	return QScrollArea::eventFilter(watcher, e);

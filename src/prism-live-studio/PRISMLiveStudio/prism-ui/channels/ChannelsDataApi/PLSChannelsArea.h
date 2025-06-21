@@ -53,6 +53,8 @@ private slots:
 	void onFoldUpButtonClick();
 	void onFoldDownButtonClick();
 
+	void updateAllChannelsByDualOutput(bool bOpen);
+
 protected:
 	void changeEvent(QEvent *e) override;
 
@@ -66,7 +68,7 @@ private:
 	enum class ScrollDirection { NOScroll, ForwardScroll, BackScroll };
 
 	//private:
-	ChannelData::ChannelCapsulePtr addChannel(const QVariantMap &channelInfo);
+	ChannelData::ChannelCapsulePtr addChannel(const QVariantMap &channelInfo, bool bInit = false);
 	ChannelData::ChannelFoldCapsulePtr addFoldChannel(const QVariantMap &channelInfo);
 
 	QHash<void *, QTimer *> mTimerContainer;
@@ -91,7 +93,7 @@ private:
 	void updateAllChannelsUi();
 	void delayUpdateAllChannelsUi();
 	void hideLoading();
-
+	
 	void initScollButtons();
 	void checkScrollButtonsState(ScrollDirection direction = ScrollDirection::ForwardScroll);
 	bool isScrollButtonsNeeded() const;
@@ -103,6 +105,7 @@ private:
 
 	void insertChannelCapsule(QWidget *wid, int index = -1) const;
 	void insertFoldChannelCapsule(QWidget *wid, int index = -1) const;
+	int getLayoutOrder(bool bFold, QHBoxLayout *layout, int channelOrder) const;
 
 	void refreshOrder() const;
 
@@ -111,6 +114,8 @@ private:
 	int visibleCount();
 
 	void createFoldButton();
+
+	void removeChannelWithoutYoutubeDock(const QString &channelUUID);
 
 	//private:
 	std::unique_ptr<Ui::ChannelsArea> ui = std::make_unique<Ui::ChannelsArea>();

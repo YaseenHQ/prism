@@ -24,9 +24,8 @@ class PLSLiveInfoFacebook : public PLSLiveInfoBase {
 public:
 	explicit PLSLiveInfoFacebook(PLSPlatformBase *pPlatformBase, QWidget *parent = nullptr);
 	~PLSLiveInfoFacebook() override;
-	void handleRequestFunctionType(PLSAPIFacebookType type);
-
-	void handleFacebookIncalidAccessToken();
+	void handleRequestFunctionType(PLSErrorHandler::RetData retData);
+	void handleFacebookIncalidAccessToken(PLSErrorHandler::RetData retData);
 
 private slots:
 	void on_cancelButton_clicked();
@@ -44,8 +43,9 @@ private:
 	void hideSearchGameList();
 	void showSearchGameList();
 	void doUpdateOkState();
-	void startLiving();
-	void facebookLivingAndUpdatingDecline(PLSAPIFacebookType &type);
+	void startLivingRequest();
+	void updateLivingRequest();
+	void getTimelineOrGroupOrPageInfoRequest();
 	void saveLiveInfo(PLSAPIFacebook::FacebookPrepareLiveInfo &oldPrepareInfo);
 	bool isModified();
 	void initPlaceTextHorderColor(QWidget *widget) const;
@@ -63,7 +63,6 @@ private:
 	PLSPlatformFacebook *platform;
 	QListWidget *m_gameListWidget;
 	QList<QString> m_expiredObjectList;
-	bool m_startLivingApi;
 	bool m_showTokenAlert{false};
 	PLSAPIFacebook::FacebookPrepareLiveInfo m_oldPrepareInfo;
 };

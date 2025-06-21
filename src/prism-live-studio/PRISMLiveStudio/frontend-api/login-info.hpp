@@ -6,7 +6,7 @@
 #include <QJsonObject>
 #include <QWidget>
 
-enum class PLSPlatformType { Twitch, YouTube, Facebook, Google, Twitter, Naver, Line, NaverTv, Vlive, Band, AfreecaTV, WhaleSpace, NaverShoppingLive, Email };
+enum class PLSPlatformType { Twitch, YouTube, Facebook, Google, Twitter, Naver, Line, NaverTv, Vlive, Band, AfreecaTV, WhaleSpace, NaverShoppingLive, Email, NAVER_Cloud_B2B, Chzzk };
 
 class FRONTEND_API PLSLoginInfo {
 protected:
@@ -80,8 +80,8 @@ public:
 	  * return:
 	  *     true for success, false for failed
 	  */
-	virtual bool loginWithAccount(QJsonObject &result, UseFor useFor, QWidget *parent = nullptr) const;
-	virtual void loginWithAccountAsync(const std::function<void(bool ok, const QJsonObject &)> &callback, UseFor useFor, QWidget *parent = nullptr) const;
+	virtual bool loginWithAccount(QVariantHash &result, UseFor useFor, QWidget *parent = nullptr) const;
+	virtual void loginWithAccountAsync(const std::function<void(bool ok, const QVariantHash &)> &callback, UseFor useFor, QWidget *parent = nullptr) const;
 
 	/**
 	  * get rtmp server url address

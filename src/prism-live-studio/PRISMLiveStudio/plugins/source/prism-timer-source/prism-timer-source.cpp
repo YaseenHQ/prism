@@ -228,14 +228,13 @@ static void init_web_source(timer_source *timerSource)
 	obs_source_inc_showing(timerSource->config.web);
 }
 
-static void mediaStateChanged(void *data, calldata_t *cb)
+static void mediaStateChanged(obs_media_state state, void *data, calldata_t *cb)
 {
 	pls_unused(cb);
 	auto context = static_cast<timer_source *>(data);
 	if (!context || !data)
 		return;
 
-	obs_media_state state = obs_source_media_get_state(context->config.sub_music);
 	PLS_INFO(s_moduleName, QString("media state changed, currrent is %1").arg(state).toUtf8().constData());
 
 	bool isStoped = false;
@@ -258,6 +257,30 @@ static void mediaStateChanged(void *data, calldata_t *cb)
 		obs_source_update_properties(context->config.source);
 	}
 }
+static void media_play(void *data, calldata_t *calldata)
+{
+	mediaStateChanged(OBS_MEDIA_STATE_PLAYING, data, calldata);
+}
+static void media_pause(void *data, calldata_t *calldata)
+{
+	mediaStateChanged(OBS_MEDIA_STATE_PAUSED, data, calldata);
+}
+static void media_restart(void *data, calldata_t *calldata)
+{
+	mediaStateChanged(OBS_MEDIA_STATE_PLAYING, data, calldata);
+}
+static void media_stopped(void *data, calldata_t *calldata)
+{
+	mediaStateChanged(OBS_MEDIA_STATE_STOPPED, data, calldata);
+}
+static void media_started(void *data, calldata_t *calldata)
+{
+	mediaStateChanged(OBS_MEDIA_STATE_PLAYING, data, calldata);
+}
+static void media_ended(void *data, calldata_t *calldata)
+{
+	mediaStateChanged(OBS_MEDIA_STATE_ENDED, data, calldata);
+}
 
 void timer_source::init_music_source()
 {
@@ -271,12 +294,12 @@ void timer_source::init_music_source()
 	obs_source_set_monitoring_type(config.sub_music, OBS_MONITORING_TYPE_MONITOR_ONLY);
 	obs_data_release(settings);
 	obs_source_inc_active(config.sub_music);
-	signal_handler_connect_ref(obs_source_get_signal_handler(config.sub_music), "media_play", mediaStateChanged, this);
-	signal_handler_connect_ref(obs_source_get_signal_handler(config.sub_music), "media_pause", mediaStateChanged, this);
-	signal_handler_connect_ref(obs_source_get_signal_handler(config.sub_music), "media_restart", mediaStateChanged, this);
-	signal_handler_connect_ref(obs_source_get_signal_handler(config.sub_music), "media_started", mediaStateChanged, this);
-	signal_handler_connect_ref(obs_source_get_signal_handler(config.sub_music), "media_ended", mediaStateChanged, this);
-	signal_handler_connect_ref(obs_source_get_signal_handler(config.sub_music), "media_stopped", mediaStateChanged, this);
+	signal_handler_connect_ref(obs_source_get_signal_handler(config.sub_music), "media_play", media_play, this);
+	signal_handler_connect_ref(obs_source_get_signal_handler(config.sub_music), "media_pause", media_pause, this);
+	signal_handler_connect_ref(obs_source_get_signal_handler(config.sub_music), "media_restart", media_restart, this);
+	signal_handler_connect_ref(obs_source_get_signal_handler(config.sub_music), "media_started", media_started, this);
+	signal_handler_connect_ref(obs_source_get_signal_handler(config.sub_music), "media_ended", media_ended, this);
+	signal_handler_connect_ref(obs_source_get_signal_handler(config.sub_music), "media_stopped", media_stopped, this);
 }
 
 static void source_create_finished(void *data, calldata_t *calldata)
@@ -308,9 +331,8 @@ static void liveStatusChangedToReloadUI(bool isStartLive, void *data)
 
 void onLiveStateChanged(enum obs_frontend_event event, void *data)
 {
-	if (event == OBS_FRONTEND_EVENT_STREAMING_STARTED) {
-		liveStatusChangedToReloadUI(true, data);
-	} else if (event == OBS_FRONTEND_EVENT_STREAMING_STOPPING || event == OBS_FRONTEND_EVENT_STREAMING_STOPPED) {
+	// OBS_FRONTEND_EVENT_STREAMING_STOPPING signal was send by streaming dealy stopping when set stream dalay
+	if (event == OBS_FRONTEND_EVENT_STREAMING_STOPPED) {
 		liveStatusChangedToReloadUI(false, data);
 	}
 }
@@ -320,6 +342,8 @@ void onPrismRearsalSwitchtoLive(pls_frontend_event event, const QVariantList &pa
 	Q_UNUSED(params)
 	if (event == pls_frontend_event::PLS_FRONTEND_EVENT_REHEARSAL_SWITCH_TO_LIVE) {
 		PLS_INFO(s_moduleName, "rehearsal switch to live to reload live time");
+		liveStatusChangedToReloadUI(true, context);
+	} else if (event == pls_frontend_event::PLS_FRONTEND_EVENT_STREAMING_TIME_READY) {
 		liveStatusChangedToReloadUI(true, context);
 	}
 }
@@ -340,7 +364,7 @@ timer_source::timer_source(obs_source_t *source, obs_data_t *settings)
 
 	signal_handler_connect_ref(obs_get_signal_handler(), "source_create_finished", source_create_finished, this);
 	obs_frontend_add_event_callback(onLiveStateChanged, this);
-	pls_frontend_add_event_callback(pls_frontend_event::PLS_FRONTEND_EVENT_REHEARSAL_SWITCH_TO_LIVE, onPrismRearsalSwitchtoLive, this);
+	pls_frontend_add_event_callback(onPrismRearsalSwitchtoLive, this);
 
 	if (obs_data_get_bool(config.settings, s_listen_list_btn)) {
 		obs_data_set_bool(config.settings, s_listen_list_btn, false);
@@ -356,15 +380,15 @@ timer_source::~timer_source()
 
 void timer_source::timer_source_update()
 {
-	dispatahNoramlJsToWeb();
+	dispatahNormalJsToWeb();
 
 	auto timerType = static_cast<TimerType>(obs_data_get_int(config.settings, s_timerType));
-	if (config.mStaus != MusicStatus::Noraml && timerType == TimerType::Current) {
-		updateControlButtons(MusicStatus::Noraml, nullptr, false, false);
+	if (config.mStaus != MusicStatus::Normal && timerType == TimerType::Current) {
+		updateControlButtons(MusicStatus::Normal, nullptr, false, false);
 		dispatahControlJsToWeb();
 	}
 
-	if (config.mStaus == MusicStatus::Noraml && timerType == TimerType::Live && isLivingInstance()) {
+	if (config.mStaus == MusicStatus::Normal && timerType == TimerType::Live && isLivingInstance()) {
 		dispatahControlJsToWeb();
 	}
 
@@ -382,10 +406,10 @@ void timer_source::didClickDefaultsButton()
 	obs_data_set_int(config.settings, s_template_list, static_cast<int>(TemplateType::One));
 	obs_data_set_int(config.settings, s_tap, 0);
 	obs_data_set_int(config.settings, s_timerType, 0);
-	updateControlButtons(MusicStatus::Noraml, nullptr, false, false);
+	updateControlButtons(MusicStatus::Normal, nullptr, false, false);
 	dispatahControlJsToWeb();
 	timer_set_some_part_default(config.settings);
-	dispatahNoramlJsToWeb();
+	dispatahNormalJsToWeb();
 	set_hotkey_visible(this);
 }
 
@@ -433,38 +457,10 @@ void timer_source::resetTextToDefaultWhenEmpty()
 	default:
 		break;
 	}
-	dispatahNoramlJsToWeb();
+	dispatahNormalJsToWeb();
 }
 
-void timer_source::sendAnalogWhenClickSavedBtn()
-{
-
-	QString type = "basic";
-	QString forColor = "";
-	QString bgColor = "";
-	bool hasBackground = true;
-	getColorData(type, forColor, bgColor, hasBackground);
-
-	QString mold = "clock";
-	QString _text = "";
-	getTextData(mold, _text);
-
-	obs_data_t *font_obj = obs_data_get_obj(config.settings, s_font_family);
-	QString fontFamliy = obs_data_get_string(font_obj, "font-family");
-	obs_data_release(font_obj);
-
-	QVariantMap _map;
-	_map["templateId"] = type;
-	_map["clockType"] = mold;
-	_map["fontFamily"] = fontFamliy;
-	_map["fontColor"] = forColor;
-	_map["bgColor"] = bgColor;
-	_map["hasBgColor"] = hasBackground;
-
-	pls_send_analog(AnalogType::ANALOG_CLOCK_WIDGET, _map);
-}
-
-void timer_source::dispatahNoramlJsToWeb()
+void timer_source::dispatahNormalJsToWeb()
 {
 	if (!this->config.web) {
 		return;
@@ -549,7 +545,7 @@ MusicStatus timer_source::getStatus(const QString &name, bool &isGot) const
 	if (name == "start") {
 		return MusicStatus::Started;
 	}
-	if (name == "finish" && MusicStatus::Noraml != config.mStaus) {
+	if (name == "finish" && MusicStatus::Normal != config.mStaus) {
 		return MusicStatus::Stoped;
 	}
 	if (name == "pause") {
@@ -562,7 +558,7 @@ MusicStatus timer_source::getStatus(const QString &name, bool &isGot) const
 		return MusicStatus::Started;
 	}
 	if (name == "cancel" || name == "countTimeChangeWhenWorking") {
-		return MusicStatus::Noraml;
+		return MusicStatus::Normal;
 	}
 	isGot = false;
 	return MusicStatus();
@@ -572,7 +568,7 @@ QString timer_source::getControlEvent() const
 {
 	QString eventName;
 	switch (config.mStaus) {
-	case MusicStatus::Noraml:
+	case MusicStatus::Normal:
 		eventName = "cancel";
 		break;
 	case MusicStatus::Started:
@@ -655,7 +651,7 @@ void timer_source::getControlButtonTextAndEnable(int idx, QString &text, bool &e
 			enable = false;
 		}
 		switch (config.mStaus) {
-		case MusicStatus::Noraml:
+		case MusicStatus::Normal:
 			text = obs_module_text("timer.btn.start");
 			break;
 		case MusicStatus::Started:
@@ -684,7 +680,7 @@ void timer_source::getControlButtonTextAndEnable(int idx, QString &text, bool &e
 		return;
 	}
 	switch (config.mStaus) {
-	case MusicStatus::Noraml:
+	case MusicStatus::Normal:
 		enable = false;
 		break;
 	case MusicStatus::Started:
@@ -712,7 +708,7 @@ void timer_source::timer_source_destroy()
 
 	obs_data_release(config.settings);
 	obs_frontend_remove_event_callback(onLiveStateChanged, this);
-	pls_frontend_remove_event_callback(pls_frontend_event::PLS_FRONTEND_EVENT_REHEARSAL_SWITCH_TO_LIVE, onPrismRearsalSwitchtoLive, this);
+	pls_frontend_remove_event_callback(onPrismRearsalSwitchtoLive, this);
 
 	signal_handler_disconnect(obs_get_signal_handler(), "source_create_finished", source_create_finished, this);
 
@@ -1241,7 +1237,7 @@ static bool top_type_radius_changed(void *data, obs_properties_t *props, obs_pro
 	auto source = static_cast<timer_source *>(data);
 	source->isChangeControlByHand = true;
 	source->onlyStopMusicIfNeeded();
-	source->updateControlButtons(MusicStatus::Noraml, props, true, false);
+	source->updateControlButtons(MusicStatus::Normal, props, true, false);
 	source->updateOKButtonEnable();
 	set_hotkey_visible(source);
 	return ui_page_check_visible(data, props, nullptr, settings);
@@ -1253,10 +1249,10 @@ static bool startButtonClicked(obs_properties_t *props, obs_property_t *p, void 
 	pls_unused(p);
 	auto source = static_cast<timer_source *>(data);
 	source->isChangeControlByHand = true;
-	MusicStatus _status = MusicStatus::Noraml;
+	MusicStatus _status = MusicStatus::Normal;
 
 	switch (source->config.mStaus) {
-	case MusicStatus::Noraml:
+	case MusicStatus::Normal:
 		_status = MusicStatus::Started;
 		break;
 	case MusicStatus::Started:
@@ -1269,7 +1265,7 @@ static bool startButtonClicked(obs_properties_t *props, obs_property_t *p, void 
 		_status = MusicStatus::Started;
 		break;
 	case MusicStatus::Stoped:
-		_status = MusicStatus::Noraml;
+		_status = MusicStatus::Normal;
 		break;
 	default:
 		break;
@@ -1285,7 +1281,7 @@ static bool stopButtonClicked(obs_properties_t *props, obs_property_t *p, void *
 	pls_unused(p);
 	auto source = static_cast<timer_source *>(data);
 	source->isChangeControlByHand = true;
-	source->updateControlButtons(MusicStatus::Noraml, props);
+	source->updateControlButtons(MusicStatus::Normal, props);
 	source->dispatahControlJsToWeb();
 
 	return true;
@@ -1371,8 +1367,8 @@ static bool timeIntGrounpCallback(void *data, obs_properties_t *props, obs_prope
 	auto timerCount = source->getCountTime(static_cast<TemplateType>(obs_data_get_int(settings, s_template_list)));
 	obs_data_set_int(settings, s_timer_all_seconds, timerCount);
 
-	if (source->config.mStaus != MusicStatus::Noraml) {
-		source->updateControlButtons(MusicStatus::Noraml, props, false, false);
+	if (source->config.mStaus != MusicStatus::Normal) {
+		source->updateControlButtons(MusicStatus::Normal, props, false, false);
 		source->dispatahControlJsToWeb();
 		return true;
 	} else {
@@ -1380,7 +1376,7 @@ static bool timeIntGrounpCallback(void *data, obs_properties_t *props, obs_prope
 		auto _count = source->getCountTime();
 		if ((_count == 0 && startEnable) || (_count > 0 && !startEnable)) {
 			QMetaObject::invokeMethod(
-				source, [source]() { source->updateControlButtons(MusicStatus::Noraml, nullptr, true); }, Qt::QueuedConnection);
+				source, [source]() { source->updateControlButtons(MusicStatus::Normal, nullptr, true); }, Qt::QueuedConnection);
 		}
 		return false;
 	}
@@ -1796,14 +1792,12 @@ void timer_source::propertiesEditEnd(bool isSaveClick)
 	obs_data_set_bool(config.settings, s_cb_enabled, false);
 	resetTextToDefaultWhenEmpty();
 	if (isChangeControlByHand && !isSaveClick) {
-		if (MusicStatus::Noraml != config.mStaus) {
-			updateControlButtons(MusicStatus::Noraml, nullptr, false, false);
+		if (MusicStatus::Normal != config.mStaus) {
+			updateControlButtons(MusicStatus::Normal, nullptr, false, false);
 			dispatahControlJsToWeb();
 		}
 	}
-	if (isSaveClick) {
-		sendAnalogWhenClickSavedBtn();
-	}
+
 	if (!config.sub_music) {
 		return;
 	}
@@ -1813,12 +1807,12 @@ void timer_source::propertiesEditEnd(bool isSaveClick)
 		obs_data_set_bool(config.settings, s_listen_list_btn, !isChecked);
 	}
 	if (config.sub_music) {
-		signal_handler_disconnect(obs_source_get_signal_handler(config.sub_music), "media_play", mediaStateChanged, this);
-		signal_handler_disconnect(obs_source_get_signal_handler(config.sub_music), "media_pause", mediaStateChanged, this);
-		signal_handler_disconnect(obs_source_get_signal_handler(config.sub_music), "media_restart", mediaStateChanged, this);
-		signal_handler_disconnect(obs_source_get_signal_handler(config.sub_music), "media_started", mediaStateChanged, this);
-		signal_handler_disconnect(obs_source_get_signal_handler(config.sub_music), "media_ended", mediaStateChanged, this);
-		signal_handler_disconnect(obs_source_get_signal_handler(config.sub_music), "media_stopped", mediaStateChanged, this);
+		signal_handler_disconnect(obs_source_get_signal_handler(config.sub_music), "media_play", media_play, this);
+		signal_handler_disconnect(obs_source_get_signal_handler(config.sub_music), "media_pause", media_pause, this);
+		signal_handler_disconnect(obs_source_get_signal_handler(config.sub_music), "media_restart", media_restart, this);
+		signal_handler_disconnect(obs_source_get_signal_handler(config.sub_music), "media_started", media_started, this);
+		signal_handler_disconnect(obs_source_get_signal_handler(config.sub_music), "media_ended", media_ended, this);
+		signal_handler_disconnect(obs_source_get_signal_handler(config.sub_music), "media_stopped", media_stopped, this);
 		obs_source_media_stop(config.sub_music);
 		obs_source_dec_active(config.sub_music);
 		obs_source_release(config.sub_music);
@@ -1916,7 +1910,7 @@ void timer_source::updateWebAudioShow(bool isShow)
 
 bool timer_source::getStartButtonHightlight() const
 {
-	return config.mStaus != MusicStatus::Noraml;
+	return config.mStaus != MusicStatus::Normal;
 }
 
 bool timer_source::getListenButtonEnable()

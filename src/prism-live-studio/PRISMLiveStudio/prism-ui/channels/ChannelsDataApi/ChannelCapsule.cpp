@@ -8,9 +8,11 @@
 #include "LogPredefine.h"
 #include "PLSChannelDataAPI.h"
 #include "PLSChannelsVirualAPI.h"
+#include "PLSPlatformNCB2B.h"
 #include "frontend-api.h"
 #include "libui.h"
 #include "pls-channel-const.h"
+#include "pls/pls-dual-output.h"
 #include "ui_ChannelCapsule.h"
 
 using namespace ChannelData;
@@ -30,6 +32,8 @@ ChannelCapsule::ChannelCapsule(QWidget *parent) : QFrame(parent), ui(new Ui::Cha
 	connect(qApp, &QCoreApplication::aboutToQuit, &mUpdateTimer, &QTimer::stop);
 
 	delayUpdateText();
+	ui->UserIcon->setFocusPolicy(Qt::NoFocus);
+	closeDualOutputUI();
 }
 
 void ChannelCapsule::normalState(const QVariantMap &info)
@@ -211,23 +215,29 @@ void ChannelCapsule::setChannelID(const QString &uuid)
 	mConfigPannel->setChannelID(mInfoID);
 }
 
-QString &translateForYoutube(QString &src)
+QString ChannelCapsule::translatePublicString(const QString &platform, const QString &src)
 {
 	if (src.isEmpty()) {
 		return src;
 	}
-	QStringList trans{QObject::tr("youtube.privacy.public"), QObject::tr("youtube.privacy.unlisted"), QObject::tr("youtube.privacy.private")};
-	QStringList indexs{"youtube.privacy.public", "youtube.privacy.unlisted", "youtube.privacy.private"};
-	QRegularExpression rule(".+" + src);
-	rule.setPatternOptions(QRegularExpression::CaseInsensitiveOption);
+	QString transSrc;
+	if (platform.contains(YOUTUBE)) {
+		QStringList trans{QObject::tr("youtube.privacy.public"), QObject::tr("youtube.privacy.unlisted"), QObject::tr("youtube.privacy.private")};
+		QStringList indexs{"youtube.privacy.public", "youtube.privacy.unlisted", "youtube.privacy.private"};
+		QRegularExpression rule(".+" + src);
+		rule.setPatternOptions(QRegularExpression::CaseInsensitiveOption);
 
-	if (auto index = indexs.indexOf(rule); index != -1) {
-		src = trans[index];
+		if (auto index = indexs.indexOf(rule); index != -1) {
+			transSrc = trans[index];
+		}
 	}
-	return src;
+	if (platform.contains(NCB2B)) {
+		transSrc = PLSAPICommon::getPairedString(PLSPlatformNCB2B::getPrivacyList(), src, true);
+	}
+	return !transSrc.isEmpty() ? transSrc : src;
 }
 
-void ChannelCapsule::updateUi()
+void ChannelCapsule::updateUi(bool bPostedEvents)
 {
 	const auto srcData = PLSCHANNELS_API->getChannelInfo(mInfoID);
 	if (srcData.isEmpty()) {
@@ -236,32 +246,33 @@ void ChannelCapsule::updateUi()
 		return;
 	}
 
+	auto bOpen = pls_is_dual_output_on();
+	setDualOutput(bOpen);
+
 	mLastMap = srcData;
 	updateIcons(mLastMap);
 	shiftState(mLastMap);
 	updateTextFrames(mLastMap);
 	delayUpdateText();
+	mConfigPannel->setDualOutput(bOpen);
 	mConfigPannel->updateUI();
+	if (bPostedEvents)
+		QApplication::sendPostedEvents();
 }
 void ChannelCapsule::updateIcons(const QVariantMap &srcData)
 {
 	int state = getInfo(srcData, g_channelStatus, Error);
-	bool needSharp = false;
 
 	QString userIcon;
 	QString platformIcon;
 	if (state == Valid || state == Error || state == Expired || state == UnAuthorized) {
-
-		if (int type = getInfo(srcData, g_data_type, NoType); type == ChannelType) {
-			needSharp = true;
-		}
-		getComplexImageOfChannel(mInfoID, userIcon, platformIcon);
+		getComplexImageOfChannel(mInfoID, ImageType::tagIcon, userIcon, platformIcon);
 	} else {
-		QString channelName = getInfo(srcData, g_platformName);
-		userIcon = getPlatformImageFromName(channelName);
+		QString channelName = getInfo(srcData, g_channelName);
+		userIcon = getPlatformImageFromName(channelName, ImageType::tagIcon);
 	}
 
-	ui->UserIcon->setMainPixmap(userIcon, QSize(30, 30), needSharp);
+	ui->UserIcon->setMainPixmap(userIcon, QSize(30, 30));
 	ui->UserIcon->setPlatformPixmap(platformIcon, QSize(16, 16));
 }
 void ChannelCapsule::updateErrorLabel(const QVariantMap &info)
@@ -273,7 +284,8 @@ void ChannelCapsule::updateErrorLabel(const QVariantMap &info)
 
 void ChannelCapsule::updateTextFrames(const QVariantMap &srcData)
 {
-	auto TextFrameSize = ui->TextFrame->width() - (ui->StateActive->isVisible() ? ui->StateActive->width() : 0);
+	int OutputDirection = ui->OutputDirection->isVisible() ? ui->StateActive->width() : 0;
+	auto TextFrameSize = ui->TextFrame->width() - (ui->StateActive->isVisible() ? ui->StateActive->width() : 0) - OutputDirection;
 	ui->UserName->resize(TextFrameSize, ui->UserName->height());
 	ui->CatogeryName->resize(ui->TextFrame->width(), ui->CatogeryName->height());
 
@@ -283,10 +295,8 @@ void ChannelCapsule::updateTextFrames(const QVariantMap &srcData)
 
 	QString line2 = getInfo(srcData, g_displayLine2, QString());
 
-	QString platformName = getInfo(srcData, g_platformName, QString());
-	if (platformName.contains(YOUTUBE) && !line2.isEmpty()) {
-		translateForYoutube(line2);
-	}
+	QString platformName = getInfo(srcData, g_fixPlatformName, QString());
+	line2 = translatePublicString(platformName, line2);
 
 	int widthElid = ui->CatogeryName->width();
 	if ((platformName == VLIVE || platformName == NAVER_SHOPPING_LIVE) && !line2.isEmpty()) {
@@ -308,6 +318,7 @@ void ChannelCapsule::updateTextFrames(const QVariantMap &srcData)
 	//catogry = QString("platfo... ") + QString::fromStdWString(std::wstring{0x25CF})+QString(" chann...")
 	//catogry = QString("platfo... ") + QString::fromStdWString(std::wstring{0x00b7}) + QString(" chann...")
 	ui->CatogeryName->setText(line2);
+	ui->TextFrame->repaint();
 }
 
 void ChannelCapsule::delayUpdateText()
@@ -315,90 +326,34 @@ void ChannelCapsule::delayUpdateText()
 	if (mLastMap.isEmpty()) {
 		return;
 	}
-	QTimer::singleShot(100, this, [this]() { updateTextFrames(mLastMap); });
+	QTimer::singleShot(100, this, [this]() {
+		PLS_INFO("ChannelCapsule", "singleShot delayUpdateText");
+		updateTextFrames(mLastMap);
+	});
 }
 
-QString &formatNumber(QString &number, bool isEng = true)
+QString &formatNumber(QString &number)
 {
 	number = number.simplified();
 	if (number.isEmpty()) {
 		number = "0";
 		return number;
 	}
-	auto N = number.count();
-	if (N <= 3) {
-		return number;
+	bool ok;
+	auto num = number.toLongLong(&ok);
+	if (ok) {
+		if (num < 1000) {
+			return number;
+		}
+		if (num >= 1000000) {
+			number = QString::number(num / 1000000.0, 'f', 2) + "M";
+			return number;
+		}
+		if (num >= 1000) {
+			number = QString::number(num / 1000.0, 'f', 2) + "K";
+			return number;
+		}
 	}
-	if (N <= 6) {
-		return number.insert(N - 3, ",");
-	}
-
-	QString head;
-	QString suffix;
-
-	switch (N) {
-	case 7:
-		if (isEng) {
-			head = number.chopped(5);
-			head.insert(N - 6, '.');
-			suffix = CHANNELS_TR(Mill);
-		} else {
-			head = number.chopped(4);
-			suffix = CHANNELS_TR(Wan);
-		}
-		break;
-	case 8:
-		if (isEng) {
-			head = number.chopped(5);
-			head.insert(N - 6, '.');
-			suffix = CHANNELS_TR(Mill);
-		} else {
-			head = number.chopped(4);
-			head.insert(1, ',');
-			suffix = CHANNELS_TR(Wan);
-		}
-
-		break;
-	case 9:
-		if (isEng) {
-			head = number.chopped(5);
-			head.insert(N - 6, '.');
-			suffix = CHANNELS_TR(Mill);
-		} else {
-			head = number.chopped(7);
-			head.insert(1, '.');
-			suffix = CHANNELS_TR(Yi);
-		}
-
-		break;
-	case 10:
-		if (isEng) {
-			head = number.chopped(8);
-			head.insert(N - 9, '.');
-			suffix = CHANNELS_TR(Bill);
-		} else {
-			head = number.chopped(8);
-			suffix = CHANNELS_TR(Yi);
-		}
-
-		break;
-
-	default:
-		if (isEng) {
-			head = number.chopped(8);
-			head.insert(N - 9, '.');
-			suffix = CHANNELS_TR(Bill);
-		} else {
-			head = number.chopped(8);
-			suffix = CHANNELS_TR(Yi);
-		}
-
-		break;
-	}
-	if (head.endsWith(".0")) {
-		head.remove(".0");
-	}
-	number = head + suffix;
 	return number;
 }
 
@@ -426,13 +381,12 @@ QString createStatisticsCss(const QString &srcImage)
 
 bool ChannelCapsule::updateStatisticInfo()
 {
-	bool isEng = IS_ENGLISH();
 	auto info = PLSCHANNELS_API->getChannelInfo(mInfoID);
 	QString viewers;
 
 	if (info.contains(g_viewers)) {
 		viewers = getInfo(info, g_viewers, QString("0"));
-		formatNumber(viewers, isEng);
+		formatNumber(viewers);
 		ui->ViewerNumberLabel->setText(viewers);
 		auto css = createStatisticsCss(getInfo(info, g_viewersPix, g_defaultViewerIcon));
 		ui->ViewerPicLabel->setStyleSheet(css);
@@ -443,7 +397,7 @@ bool ChannelCapsule::updateStatisticInfo()
 	QString likes;
 	if (info.contains(g_likes)) {
 		likes = getInfo(info, g_likes, QString("0"));
-		formatNumber(likes, isEng);
+		formatNumber(likes);
 		ui->LikeNumberLabel->setText(likes);
 
 		auto css = createStatisticsCss(getInfo(info, g_likesPix, g_defaultLikeIcon));
@@ -454,6 +408,15 @@ bool ChannelCapsule::updateStatisticInfo()
 	}
 
 	return !(viewers.isEmpty() && likes.isEmpty());
+}
+bool ChannelCapsule::isYoutube()
+{
+	int dataType = getInfo(mLastMap, g_data_type, NoType);
+	auto name = getInfo(mLastMap, g_channelName, QString());
+	if (dataType == ChannelType && name.contains(YOUTUBE, Qt::CaseInsensitive)) {
+		return true;
+	}
+	return false;
 }
 void ChannelCapsule::changeEvent(QEvent *e)
 {
@@ -469,65 +432,62 @@ void ChannelCapsule::changeEvent(QEvent *e)
 
 bool ChannelCapsule::eventFilter(QObject *watched, QEvent *event)
 {
-	switch (event->type()) {
-	case QEvent::HoverMove:
-		if (!isVisible())
-			return false;
-		if (!PLSCHANNELS_API->isEmptyToAcquire() || watched == mConfigPannel || isPannelOutOfView() || mConfigPannel->isVisible() || PLSCHANNELS_API->isShifting()) {
-			return false;
-		}
-		showConfigPannel();
-		return true;
-
-	case QEvent::HoverLeave:
-		if (mConfigPannel == watched && !mConfigPannel->GetMeunShow()) {
+	if (watched == mConfigPannel) {
+		switch (event->type()) {
+		case QEvent::Wheel:
 			hideConfigPannel();
-			return true;
-		} else if (mConfigPannel == watched && mConfigPannel->GetMeunShow()) {
-			showConfigPannel();
-			return true;
-		}
-
-		if (auto hLeav = dynamic_cast<QHoverEvent *>(event); hLeav) {
-			auto pos = hLeav->position().toPoint();
-			auto contentRec = this->rect();
-			if (!contentRec.contains(pos)) {
-				hideConfigPannel();
-				return true;
-			}
-		}
-		break;
-	case QEvent::Wheel:
-		if (mConfigPannel == watched) {
-			hideConfigPannel();
-		}
-		break;
+			break;
 #ifdef DEBUG
-	case QEvent::MouseButtonDblClick:
-		if (mConfigPannel == watched) {
+		case QEvent::MouseButtonDblClick:
 			auto mouseEvn = dynamic_cast<QMouseEvent *>(event);
 			if (mouseEvn && mouseEvn->button() == Qt::LeftButton && mouseEvn->modifiers().testFlag(Qt::ControlModifier)) {
 				ViewMapData(PLSCHANNELS_API->getChannelInfo(mInfoID));
 			}
-		}
-		break;
+			break;
 #endif // DEBUG
+		default:
+			break;
+		}
 
-	default:
-		break;
-	} //end switch
-
+	} else {
+		switch (event->type()) {
+		case QEvent::HoverMove:
+			if (!isVisible())
+				return false;
+			if (!PLSCHANNELS_API->isEmptyToAcquire() || isPannelOutOfView() || mConfigPannel->isVisible() || PLSCHANNELS_API->isShifting()) {
+				return false;
+			}
+			showConfigPannel();
+			return true;
+		case QEvent::HoverLeave:
+			if (auto hLeav = dynamic_cast<QHoverEvent *>(event); hLeav) {
+				auto pos = hLeav->position().toPoint();
+				auto contentRec = this->rect();
+				if (!contentRec.contains(pos) && !mConfigPannel->GetMeunShow()) {
+					hideConfigPannel();
+					return true;
+				}
+			}
+			break;
+		default:
+			break;
+		}
+	}
 	return false;
 }
 
 void ChannelCapsule::showConfigPannel()
 {
-	mConfigPannel->show();
+	if (mConfigPannel && !mConfigPannel->isVisible()) {
+		mConfigPannel->show();
+	}
 }
 
 void ChannelCapsule::hideConfigPannel()
 {
-	mConfigPannel->hide();
+	if (mConfigPannel && mConfigPannel->isVisible()) {
+		mConfigPannel->hide();
+	}
 }
 
 bool ChannelCapsule::switchUpdateStatisticInfo(bool on)
@@ -557,4 +517,48 @@ void ChannelCapsule::setOnLine(bool isActive)
 bool ChannelCapsule::isSelectedDisplay() const
 {
 	return PLSCHANNELS_API->isChannelSelectedDisplay(mInfoID);
+}
+
+void ChannelCapsule::setDualOutput(bool bOpen)
+{
+	mConfigPannel->setDualOutput(bOpen);
+	mConfigPannel->updateUISpacing(bOpen);
+	if (bOpen) {
+		auto dualOutput = PLSCHANNELS_API->getValueOfChannel(mInfoID, g_channelDualOutput, NoSet);
+		switch (dualOutput) {
+		case channel_data::NoSet:
+			closeDualOutputUI();
+			break;
+		case channel_data::HorizontalOutput:
+			setHorizontalOutputUI();
+			break;
+		case channel_data::VerticalOutput:
+			setVerticalOutputUI();
+			break;
+		default:
+			break;
+		}
+	} else {
+		closeDualOutputUI();
+	}
+}
+
+void ChannelCapsule::setHorizontalOutputUI()
+{
+	ui->OutputDirection->setVisible(true);
+	ui->OutputDirection->setProperty("VerticalOutput", false);
+	refreshStyle(ui->OutputDirection);
+}
+
+void ChannelCapsule::setVerticalOutputUI()
+{
+	ui->OutputDirection->setVisible(true);
+	ui->OutputDirection->setProperty("VerticalOutput", true);
+	refreshStyle(ui->OutputDirection);
+}
+
+void ChannelCapsule::closeDualOutputUI()
+{
+	ui->OutputDirection->setVisible(false);
+	ui->OutputDirection->setText("");
 }

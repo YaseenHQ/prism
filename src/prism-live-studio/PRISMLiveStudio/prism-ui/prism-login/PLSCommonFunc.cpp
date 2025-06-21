@@ -8,12 +8,14 @@
 #include <qapplication.h>
 #include <qwidget.h>
 #include "PLSDialogView.h"
-#include "PLSResCommonFuns.h"
 #include "liblog.h"
 #include "pls-common-define.hpp"
 #include "prism-version.h"
 #include "loading-event.hpp"
 #include "window-basic-interaction.hpp"
+#include <util/platform.h>
+#include "PLSAlertView.h"
+#include "frontend-api.h"
 
 #define USER_CACHE_PATH QString("%1/%2").arg(PLSResCommonFuns::getAppLocationPath()).arg("/user/cache")
 
@@ -62,7 +64,7 @@ bool PLSLoginFunc::isExistPath(const QString &dirName)
 
 QString PLSLoginFunc::getUserPath(const QString &dirName, const QString &fileName)
 {
-	QString path = QString("%1/%2").arg(PLSResCommonFuns::getAppLocationPath()).arg(dirName);
+	QString path = pls_get_prism_subpath(dirName, true);
 	if (!makePath(path).isEmpty() && !fileName.isEmpty()) {
 		path += "/" + fileName;
 	}
@@ -137,6 +139,11 @@ QWidget *PLSLoginFunc::getToplevelView(QWidget *widget)
 QString PLSLoginFunc::getPrismVersion()
 {
 	return QString("%1.%2.%3").arg(PLS_VERSION_MAJOR).arg(PLS_VERSION_MINOR).arg(PLS_VERSION_PATCH);
+}
+
+QString PLSLoginFunc::getPrismVersionWithBuild()
+{
+	return QString("%1.%2.%3.%4").arg(PLS_VERSION_MAJOR).arg(PLS_VERSION_MINOR).arg(PLS_VERSION_PATCH).arg(PLS_VERSION_BUILD);
 }
 
 QString PLSLoginFunc::makePath(const QString &resDir)
@@ -244,7 +251,7 @@ PLSLoadingPage *PLSUIFunc::showLoadingView(QWidget *parent, const QString &tipSt
 	pLoadingEvent->startLoadingTimer(loadingBtn);
 
 	pWidgetLoadingBG->setStyleSheet("#loadingBG{background-color: rgba(39, 39, 39, 0.8);}"
-					"#loadingTipsLabel{font-size: 14px; background-color: transparent; padding-left: 20px; padding-right: 20px;}"
+					"#loadingTipsLabel{font-size: 14px; font-weight: normal; background-color: transparent; padding-left: 20px; padding-right: 20px;}"
 					"#loadingBtn{background-color: transparent;}");
 
 	parent->installEventFilter(new OBSEventFilter(parent, [parent, pWidgetLoadingBG](QObject *obj, QEvent *event) {
@@ -256,4 +263,10 @@ PLSLoadingPage *PLSUIFunc::showLoadingView(QWidget *parent, const QString &tipSt
 	}));
 
 	return pWidgetLoadingBG;
+}
+
+void PLSUIFunc::showEnumTimeoutAlertView(const QString &deviceName)
+{
+	PLS_LOGEX(PLS_LOG_ERROR, MAINFRAME_MODULE, {{"enumTimeOut", deviceName.toUtf8().data()}}, "Enumerate device '%s' timeout.", qUtf8Printable(deviceName));
+	PLSAlertView::warning(pls_get_main_view(), pls_translate_qstr("Alert.Title"), pls_translate_qstr("main.property.prism.enume.device.timeout").arg(deviceName));
 }

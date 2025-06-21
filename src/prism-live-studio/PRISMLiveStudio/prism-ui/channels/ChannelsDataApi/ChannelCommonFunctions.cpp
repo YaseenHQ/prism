@@ -16,6 +16,11 @@
 #include "frontend-api.h"
 #include "libhttp-client.h"
 
+#include <qapplication.h>
+#include "PLSLoginDataHandler.h"
+#include "PLSSyncServerManager.hpp"
+#include "login-user-info.hpp"
+#include "obs-app.hpp"
 #include "pls-channel-const.h"
 
 constexpr auto QRCPATH = ":/channels/resource";
@@ -26,6 +31,7 @@ IMPL_ENUM_SERIALIZATION(ChannelData::ChannelUserStatus);
 IMPL_ENUM_SERIALIZATION(ChannelData::ChannelDataType);
 IMPL_ENUM_SERIALIZATION(ChannelData::LiveState);
 IMPL_ENUM_SERIALIZATION(ChannelData::RecordState);
+IMPL_ENUM_SERIALIZATION(ChannelData::ChannelDualOutput);
 
 QString findFileInResources(const QString &dirPath, const QString &key)
 {
@@ -110,7 +116,11 @@ QString translatePlatformName(const QString &platformName)
 		return TR_NAVER_SHOPPING_LIVE;
 	}
 
-	return platformName;
+	if (platformName.contains(CHZZK, Qt::CaseInsensitive)) {
+		return TR_CHZZK;
+	}
+
+	return channelNameConvertMultiLang(platformName);
 }
 
 bool isVersionLessthan(const QString &leftVer, const QString &rightVer)
@@ -118,38 +128,25 @@ bool isVersionLessthan(const QString &leftVer, const QString &rightVer)
 	return QVersionNumber::fromString(leftVer) < QVersionNumber::fromString(rightVer);
 }
 
-ChannelsMap getMatchKeysInfos(const QVariantMap &keysMap)
-{
-	ChannelsMap ret;
-	auto isMatched = [&](const QVariantMap &info) {
-		for (auto srcIte = keysMap.cbegin(); srcIte != keysMap.cend(); ++srcIte) {
-			if (srcIte.value() != getInfo(info, srcIte.key(), QVariant())) {
-				return false;
-			}
-		}
-		return true;
-	};
-
-	const auto &allInfos = PLSCHANNELS_API->getAllChannelInfoReference();
-	for (auto ite = allInfos.cbegin(); ite != allInfos.cend(); ++ite) {
-		const auto &info = ite.value();
-		if (isMatched(info)) {
-			ret.insert(ite.key(), info);
-		}
-	}
-
-	return ret;
-}
-
-QVariantMap createDefaultChannelInfoMap(const QString &platformName, int defaultType)
+QVariantMap createDefaultChannelInfoMap(const QString &platformName, int defaultType, const QString &cmdStr)
 {
 	QVariantMap channelInfo;
 	QString uuid = createUUID();
 	channelInfo.insert(g_channelUUID, uuid);
-	channelInfo.insert(g_platformName, platformName);
+	QString tempPlatformName = platformName;
+	if (SELECT_TYPE == platformName) {
+		tempPlatformName = CUSTOM_RTMP;
+	}
+	channelInfo.insert(g_fixPlatformName, tempPlatformName);
 
-	channelInfo.insert(g_nickName, platformName);
-	channelInfo.insert(g_userName, platformName);
+	QString tempName = platformName;
+	if (!cmdStr.isEmpty()) {
+		tempName = cmdStr;
+	}
+	channelInfo.insert(g_channelName, tempName);
+
+	channelInfo.insert(g_nickName, tempName);
+	channelInfo.insert(g_userName, tempName);
 	channelInfo.insert(g_data_type, defaultType);
 	channelInfo.insert(g_channelStatus, InValid);
 	channelInfo.insert(g_channelUserStatus, Disabled);
@@ -161,13 +158,14 @@ QVariantMap createDefaultChannelInfoMap(const QString &platformName, int default
 	qsizetype index = -1;
 	if (defaultType == ChannelType) {
 		auto defaultPlatforms = getDefaultPlatforms();
-		index = defaultPlatforms.indexOf(platformName);
+		index = defaultPlatforms.indexOf(tempName);
 	} else if (defaultType >= CustomType) {
 		channelInfo.insert(g_rtmpUserID, "");
 		channelInfo.insert(g_password, "");
-		channelInfo.insert(g_platformName, RTMPT_DEFAULT_TYPE);
+		channelInfo.insert(g_channelName, RTMPT_DEFAULT_TYPE);
 	}
 	channelInfo.insert(g_displayOrder, index);
+	channelInfo.insert(g_channelDualOutput, NoSet);
 	return channelInfo;
 }
 
@@ -175,11 +173,117 @@ QString createUUID()
 {
 	return QUuid::createUuid().toString();
 }
-QString getPlatformImageFromName(const QString &channelName, const QString &prefix, const QString &surfix)
+
+QString getDynamicChannelIcon(QString &imagePath)
 {
+	if (!imagePath.isEmpty()) {
+		QString tmpPath = QString("PRISMLiveStudio/resources/library/library_Policy_PC/%1").arg(imagePath);
+		tmpPath = pls_get_user_path(tmpPath);
+		if (QFile::exists(tmpPath)) {
+			return tmpPath;
+		} else {
+#if defined(Q_OS_WIN)
+			auto localeTempPath = QApplication::applicationDirPath() + QStringLiteral("/../../data/prism-studio/DynamicChannelIcon/%1");
+#elif defined(Q_OS_MACOS)
+			auto localeTempPath = pls_get_app_resource_dir() + "/data/prism-studio/DynamicChannelIcon/%1";
+#endif
+			QString localePath = localeTempPath.arg(imagePath);
+			if (QFile::exists(localePath)) {
+				return localePath;
+			} else {
+				PLS_ERROR("channle", "image path is not exist %s", localePath.toUtf8().constData());
+			}
+		}
+	}
+	return QString();
+}
+
+QString getChatIcon(const QString &channelName, int imageType, const QString &resChatIconPath)
+{
+	auto map = PLSSyncServerManager::instance()->getSupportedPlatformsMap();
+	auto channelMap = map.value(channelName).toMap();
+	auto chatIconMap = channelMap.value("chatIcon").toMap();
+	QString imagePath;
+	switch (imageType) {
+	case ImageType::chatIcon_offNormal:
+		imagePath = getInfo(chatIconMap, "offNormal", QString());
+		break;
+	case ImageType::chatIcon_offHover:
+		imagePath = getInfo(chatIconMap, "offHover", QString());
+		break;
+	case ImageType::chatIcon_offClick:
+		imagePath = getInfo(chatIconMap, "offClick", QString());
+		break;
+	case ImageType::chatIcon_offDisable:
+		imagePath = getInfo(chatIconMap, "offDisable", QString());
+		break;
+	case ImageType::chatIcon_onNormal:
+		imagePath = getInfo(chatIconMap, "onNormal", QString());
+		break;
+	case ImageType::chatIcon_onHover:
+		imagePath = getInfo(chatIconMap, "onHover", QString());
+		break;
+	case ImageType::chatIcon_onClick:
+		imagePath = getInfo(chatIconMap, "onClick", QString());
+		break;
+	default:
+		break;
+	}
+
+	auto tmpPath = getDynamicChannelIcon(imagePath);
+	if (!tmpPath.isEmpty()) {
+		return tmpPath;
+	}
+	if (QFile::exists(resChatIconPath)) {
+		return resChatIconPath;
+	}
+	return QString();
+}
+QString getPlatformImageFromName(const QString &channelName, int imageType, const QString &prefix, const QString &surfix)
+{
+	auto map = PLSSyncServerManager::instance()->getSupportedPlatformsMap();
+	auto channelMap = map.value(channelName).toMap();
+	QString imagePath, defaultPath;
+	switch (imageType) {
+	case ImageType::tagIcon:
+		imagePath = getInfo(channelMap, "tagIcon", QString());
+		defaultPath = g_tagIcon;
+		if (imagePath.isEmpty()) {
+			defaultPath.clear();
+		}
+		break;
+	case ImageType::dashboardButtonIcon:
+		imagePath = getInfo(channelMap, "dashboardButtonIcon", QString());
+		defaultPath = g_dashboardButtonIcon;
+		break;
+	case ImageType::addChannelButtonIcon:
+		imagePath = getInfo(channelMap, "addChannelButtonIcon", QString());
+		defaultPath = g_addChannelButtonIcon;
+		break;
+	case ImageType::addChannelButtonConnectedIcon:
+		imagePath = getInfo(channelMap, "addChannelButtonConnectedIcon", QString());
+		defaultPath = g_addChannelButtonConnectedIcon;
+		break;
+	case ImageType::channelSettingBigIcon:
+		imagePath = getInfo(channelMap, "channelSettingBigIcon", QString());
+		defaultPath = g_channelSettingBigIcon;
+		break;
+	default:
+		break;
+	}
+
+	auto tmpPath = getDynamicChannelIcon(imagePath);
+	if (!tmpPath.isEmpty()) {
+		return tmpPath;
+	}
 	auto searchKey = prefix + channelName + surfix;
 	searchKey.remove(" ");
-	return findFileInResources(QRCPATH, searchKey);
+	imagePath = findFileInResources(QRCPATH, searchKey);
+
+	if (imagePath.isEmpty()) {
+		imagePath = defaultPath;
+	}
+	return imagePath;
 }
 
 QString getYoutubeShareUrl(const QString &broadCastID)
@@ -188,34 +292,6 @@ QString getYoutubeShareUrl(const QString &broadCastID)
 	url += "/watch?v=";
 	url += broadCastID;
 	return url;
-}
-
-QString getHostMacAddress()
-{
-	QList<QNetworkInterface> nets = QNetworkInterface::allInterfaces();
-	QString strMacAddr = "";
-	auto netCount = nets.count();
-	for (int i = 0; i < netCount; i++) {
-		auto add = nets[i];
-		auto flags = add.flags();
-		if (flags.testFlag(QNetworkInterface::IsUp) && flags.testFlag(QNetworkInterface::IsRunning) && !flags.testFlag(QNetworkInterface::IsLoopBack)) {
-			strMacAddr = add.hardwareAddress();
-			break;
-		}
-	}
-	return strMacAddr;
-}
-
-bool writeFile(const QByteArray &array, const QString &path)
-{
-	QFile file(path);
-	if (!file.open(QFile::WriteOnly | QIODevice::Text)) {
-		return false;
-	}
-
-	file.write(array);
-	file.close();
-	return true;
 }
 
 void loadPixmap(QPixmap &pix, const QString &pixmapPath, const QSize &pixSize)
@@ -235,36 +311,25 @@ void loadPixmap(QPixmap &pix, const QString &pixmapPath, const QSize &pixSize)
 	}
 }
 
-void getComplexImageOfChannel(const QString &uuid, QString &userIcon, QString &platformIcon, const QString &prefix, const QString &surfix)
+void getComplexImageOfChannel(const QString &uuid, int imageType, QString &userIcon, QString &platformIcon, const QString &prefix, const QString &surfix)
 {
 	const auto &srcData = PLSCHANNELS_API->getChanelInfoRef(uuid);
 
-	QString platformName = getInfo(srcData, g_platformName, QString());
+	QString platformName = getInfo(srcData, g_channelName, QString());
 	if (srcData.isEmpty()) {
 		return;
 	}
 	int type = getInfo(srcData, g_data_type, NoType);
 	if (type >= CustomType) {
-		userIcon = getPlatformImageFromName(platformName);
+		userIcon = getPlatformImageFromName(platformName, imageType);
 		if (userIcon.isEmpty()) {
 			userIcon = g_defualtPlatformIcon;
 		}
 		platformIcon = g_defualtPlatformSmallIcon;
 	} else {
 		userIcon = getInfo(srcData, g_userIconCachePath, g_defaultHeaderIcon);
-		platformIcon = getPlatformImageFromName(platformName, prefix, surfix);
+		platformIcon = getPlatformImageFromName(platformName, imageType, prefix, surfix);
 	}
-}
-
-void formatJson(QByteArray &array)
-{
-	auto document = QJsonDocument::fromJson(array);
-	array = document.toJson(QJsonDocument::Indented);
-}
-
-void requestStartLog(const QString &url, const QString &requestType)
-{
-	PLS_INFO("Channels", "%s", QString("http request start:%1, url = " + url + ".").arg(requestType).toStdString().c_str());
 }
 
 QString getImageCacheFilePath()
@@ -297,14 +362,99 @@ QString getTmpCacheDir()
 	return dir.path();
 }
 
-QString getChannelSettingsFilePath()
+const QStringList getDefaultPlatforms()
 {
-	return getChannelCacheDir() + QDir::separator() + g_channelSettingsFile;
+	QStringList SupportedPlatforms = PLSSyncServerManager::instance()->getSupportedPlatformsList();
+	if (SupportedPlatforms.isEmpty()) {
+		return gDefaultPlatform;
+	}
+
+	return SupportedPlatforms;
 }
 
-const QStringList &getDefaultPlatforms()
+QString channleNameConvertFixPlatformName(const QString &channleName)
 {
-	return gDefaultPlatform;
+	auto map = PLSSyncServerManager::instance()->getSupportedPlatformsMap();
+	auto channelMap = map.value(channleName).toMap();
+	QString platform = channelMap.value("platform").toString();
+	if (platform.isEmpty()) {
+		return channleName;
+	}
+	return platform;
+}
+
+QString NCB2BConvertChannelName(const QString &name)
+{
+	if (name == NCB2B) {
+		auto map = PLSSyncServerManager::instance()->getSupportedPlatformsMap();
+		foreach(QVariant value, map.values())
+		{
+			auto platform = value.toMap().value("platform").toString();
+			auto serviceName = value.toMap().value("serviceName").toString();
+			QString userServiceName = PLSLoginUserInfo::getInstance()->getNCPPlatformServiceName();
+			if (platform == name && serviceName == userServiceName) {
+				return map.key(value.toMap());
+			}
+		}
+	}
+	return name;
+}
+
+QString getNCB2BServiceName(const QString &name)
+{
+	auto map = PLSSyncServerManager::instance()->getSupportedPlatformsMap();
+	auto channelMap = map.value(name).toMap();
+	return channelMap.value("serviceName").toString();
+}
+
+QString channelNameConvertMultiLang(const QString &name)
+{
+	auto map = PLSSyncServerManager::instance()->getSupportedPlatformsMap();
+	auto channelMap = map.value(name).toMap();
+
+	QString multiLang;
+	auto var = channelMap.value("name");
+	if (var.typeId() == QMetaType::QString) {
+		multiLang = var.toString();
+	} else if (var.typeId() == QMetaType::QVariantMap) {
+		auto nameMap = var.toMap();
+		auto enLang = nameMap.value("EN").toString();
+		auto lang = pls_get_current_language_short_str().toUpper();
+		multiLang = nameMap.value(lang).toString();
+		if (multiLang.isEmpty()) {
+			multiLang = enLang;
+		}
+	}
+
+	if (multiLang.isEmpty()) {
+		return name;
+	}
+	return multiLang;
+}
+
+QStringList getChatChannelNameList(bool bAddNCPPrefix)
+{
+	QStringList channelList;
+
+	auto platformsList = PLSSyncServerManager::instance()->getSupportedPlatformsList();
+	for (QString chName : platformsList) {
+		if (chName == CHZZK || chName == TWITCH || chName == YOUTUBE || chName == FACEBOOK || chName == NAVER_SHOPPING_LIVE || chName == NAVER_TV || chName == AFREECATV) {
+			channelList.append(chName);
+		}
+	}
+	auto map = PLSSyncServerManager::instance()->getSupportedPlatformsMap();
+	foreach(QVariant value, map.values())
+	{
+		auto platform = value.toMap().value("platform").toString();
+		if (!platform.isEmpty() && platform != CUSTOM_RTMP && platform != CUSTOM_SRT && platform != CUSTOM_RIST) {
+			auto chName = map.key(value.toMap());
+			if (bAddNCPPrefix) {
+				chName.insert(0, "NCP_");
+			}
+			channelList.insert(0, chName);
+		}
+	}
+	return channelList;
 }
 
 QString guessPlatformFromRTMP(const QString &rtmpUrl)
@@ -315,6 +465,20 @@ QString guessPlatformFromRTMP(const QString &rtmpUrl)
 	if (auto retIte = std::find_if(rtmpInfos.constBegin(), rtmpInfos.constEnd(), isUrlMatched); retIte != rtmpInfos.constEnd()) {
 		return retIte.key();
 	}
+	auto apiTwitchServers = PLSLoginDataHandler::instance()->getTwitchServer();
+	for (auto pair : apiTwitchServers) {
+		if (rtmpUrl.contains(pair.second)) {
+			return TWITCH;
+		}
+	}
+
+	auto obsTwitchServers = getObsTwitchServer();
+	for (auto pair : obsTwitchServers) {
+		if (rtmpUrl.contains(pair.second)) {
+			return TWITCH;
+		}
+	}
+
 	return QString(CUSTOM_RTMP);
 }
 
@@ -398,70 +562,13 @@ QString getElidedText(const QWidget *widget, const QString &srcTxt, int minWidth
 	return widget->fontMetrics().elidedText(srcTxt, mode, minWidth, flag);
 }
 
-void setStyleSheetFromFile(const QString &fileStr, QWidget *wid)
+void downloadUserImage(const QString &url, const QString &Prefix, pls::rsm::IDownloader::ResultCb &&resultCb)
 {
-	QFile file(fileStr);
-	if (file.open(QIODevice::ReadOnly)) {
-		wid->setStyleSheet(file.readAll());
-	}
-}
-
-bool isCacheFileMatchCurrentLang()
-{
-	static bool isMacth = false;
-	if (isMacth) {
-		return true;
-	}
-
-	auto fileStr = getChannelCacheDir() + "/transFlag.txt";
-
-	if (QFile file(fileStr); file.open(QIODevice::ReadWrite)) {
-
-		if (QString txt = file.readLine(); !pls_is_match_current_language(txt)) {
-			file.seek(0);
-			file.write(pls_get_current_language().toUtf8());
-			file.write("\n");
-			return false;
-		}
-		isMacth = true;
-	}
-	return isMacth;
-}
-
-void translateSVGText(const QString &srcPath, const QString &txt, const QString &resultTxt)
-{
-	QFile file(srcPath);
-	QFile output(getChannelCacheDir() + "/" + QFileInfo(srcPath).fileName());
-	if (file.open(QIODevice::ReadOnly) && output.open(QIODevice::WriteOnly)) {
-		QTextStream in(&file);
-		QTextStream out(&output);
-
-		while (!in.atEnd()) {
-			auto line = in.readLine();
-			line.replace(txt, resultTxt);
-			out << line;
-		}
-	}
-}
-
-void downloadUserImage(const QString &url, const QString &dirPath, const QString &Prefix, const std::function<void(const pls::http::Reply &reply)> &finish)
-{
-	pls::http::Request request;
-	request.url(url);
-	request.forDownload(true);
-	request.withLog(pls_masking_person_info(url));
-	if (!Prefix.isEmpty()) {
-		request.saveFileNamePrefix(Prefix);
-	}
-
-	request.saveDir(dirPath);
-	request.receiver(PLSCHANNELS_API);
-	request.timeout(PRISM_NET_DOWNLOAD_TIMEOUT);
-	request.method(pls::http::Method::Get);
-
-	request.okResult(finish);
-
-	pls::http::request(request);
+	auto urlAndHowSave = pls::rsm::UrlAndHowSave()                      //
+				     .url(url)                              //
+				     .fileName(pls::rsm::FileName::FromUrl) //
+				     .keyPrefix(Prefix);                    //
+	pls::rsm::getDownloader()->download(urlAndHowSave, PLSCHANNELS_API, std::move(resultCb));
 }
 
 QString toPlatformCodeID(const QString &srcName, bool toKeepSRC)
@@ -489,13 +596,65 @@ QString toPlatformCodeID(const QString &srcName, bool toKeepSRC)
 	return tmp;
 }
 
-QVariantMap queryStringToMap(const QString &srcStr)
+QList<QPair<QString, QString>> initTwitchServer()
 {
-	QUrlQuery query(srcStr);
-	QVariantMap varMap;
-	auto items = query.queryItems();
-	for (const auto &item : items) {
-		varMap.insert(item.first, item.second);
+	auto apiTwitchServerList = PLSLoginDataHandler::instance()->getTwitchServer();
+	if (apiTwitchServerList.size() > 0) {
+		GlobalVars::g_bUseAPIServer = true;
+		return apiTwitchServerList;
 	}
-	return varMap;
+
+	GlobalVars::g_bUseAPIServer = false;
+	auto obsTwitchServerList = getObsTwitchServer();
+	if (obsTwitchServerList.size() > 0) {
+		return obsTwitchServerList;
+	}
+	return QList<QPair<QString, QString>>{};
+}
+
+QList<QPair<QString, QString>> getObsTwitchServer()
+{
+	QList<QPair<QString, QString>> obsTwitchServer;
+	QString serviceName = TWITCH_SERVICE;
+	obs_properties_t *props = obs_get_service_properties("rtmp_common");
+	obs_property_t *services = obs_properties_get(props, "service");
+
+	OBSDataAutoRelease settings = obs_data_create();
+
+	obs_data_set_string(settings, "service", serviceName.toUtf8().constData());
+	obs_property_modified(services, settings);
+
+	obs_property_t *servers = obs_properties_get(props, "server");
+
+	size_t servers_count = obs_property_list_item_count(servers);
+	for (size_t i = 0; i < servers_count; i++) {
+		const char *name = obs_property_list_item_name(servers, i);
+		const char *server = obs_property_list_item_string(servers, i);
+		if (!pls_is_empty(name) && !pls_is_empty(server)) {
+			obsTwitchServer.append(QPair<QString, QString>(name, server));
+		}
+	}
+	obs_properties_destroy(props);
+	return obsTwitchServer;
+}
+
+void ChannelsNetWorkPretestWithAlerts(const pls::http::Reply &reply, bool notify)
+{
+	if (!notify) {
+		return;
+	}
+
+	auto errorValue = reply.error();
+	auto statusCode = reply.statusCode();
+	PLSErrorHandler::ExtraData exData;
+	QString method = reply.request().method().constData();
+	exData.urlEn = method + reply.request().originalUrl().path();
+
+	auto retData = PLSErrorHandler::getAlertString({statusCode, errorValue, reply.data()}, CUSTOM_RTMP, "", exData);
+	if (retData.prismCode == PLSErrorHandler::CHANNEL_CUSTOM_RTMP_TOKEN_EXPIRED) {
+		PLSCHANNELS_API->prismTokenExpired(retData);
+		return;
+	}
+	addErrorFromRetData(retData);
+	PLSCHANNELS_API->networkInvalidOcurred();
 }

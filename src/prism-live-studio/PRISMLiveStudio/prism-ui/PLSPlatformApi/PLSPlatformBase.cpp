@@ -6,27 +6,28 @@
 #include "prism/PLSPlatformPrism.h"
 #include "PLSServerStreamHandler.hpp"
 #include "PLSAlertView.h"
+#include "pls/pls-dual-output.h"
 
 using namespace std;
 
 const std::array<const char *, PLATFORM_SIZE> NamesForChannelType =
-	pls_make_array<const char *>(CUSTOM_RTMP, TWITCH, YOUTUBE, FACEBOOK, VLIVE, NAVER_TV, BAND, AFREECATV, NAVER_SHOPPING_LIVE, TWITTER);
+	pls_make_array<const char *>(CUSTOM_RTMP, TWITCH, YOUTUBE, FACEBOOK, VLIVE, NAVER_TV, BAND, AFREECATV, NAVER_SHOPPING_LIVE, TWITTER, CHZZK, NCB2B);
 const std::array<const char *, PLATFORM_SIZE> NamesForSettingId =
-	pls_make_array<const char *>("", "Twitch", "YouTube", "Facebook Live", "Vlive", "NaverTv", "BAND", "AFREECATV", NAVER_SHOPPING_LIVE, TWITTER);
+	pls_make_array<const char *>("", "Twitch", "YouTube", "Facebook Live", "Vlive", "NaverTv", "BAND", "AFREECATV", NAVER_SHOPPING_LIVE, TWITTER, CHZZK, NCB2B);
 const std::array<const char *, PLATFORM_SIZE> NamesForLiveStart =
-	pls_make_array<const char *>("CUSTOM", "TWITCH", "YOUTUBE", "FACEBOOK", "VLIVE", "NAVERTV", "BAND", "AFREECATV", "SHOPPINGLIVE", "TWITTER");
+	pls_make_array<const char *>("CUSTOM", "TWITCH", "YOUTUBE", "FACEBOOK", "VLIVE", "NAVERTV", "BAND", "AFREECATV", "SHOPPINGLIVE", "TWITTER", "CHZZK", NCP_LIVE_START_NAME);
 
 const char *const KeyConfigLiveInfo = "LiveInfo";
 const char *const KeyTwitchServer = "TwitchServer";
 
 QString PLSPlatformBase::getChannelUUID() const
 {
-	return mySharedData().m_mapInitData[ChannelData::g_channelUUID].toString();
+	return mySharedData().m_mapInitData.value(ChannelData::g_channelUUID).toString();
 }
 
 QString PLSPlatformBase::getChannelToken() const
 {
-	return mySharedData().m_mapInitData[ChannelData::g_channelToken].toString();
+	return mySharedData().m_mapInitData.value(ChannelData::g_channelToken).toString();
 }
 
 QString PLSPlatformBase::getChannelRefreshToken() const
@@ -41,7 +42,12 @@ ChannelData::ChannelDataType PLSPlatformBase::getChannelType() const
 
 QString PLSPlatformBase::getChannelName() const
 {
-	return mySharedData().m_mapInitData[ChannelData::g_platformName].toString();
+	return mySharedData().m_mapInitData[ChannelData::g_channelName].toString();
+}
+
+QString PLSPlatformBase::getPlatFormName() const
+{
+	return mySharedData().m_mapInitData[ChannelData::g_fixPlatformName].toString();
 }
 
 int PLSPlatformBase::getChannelOrder() const
@@ -102,18 +108,26 @@ void PLSPlatformBase::prepareLiveCallback(bool value)
 		return;
 	}
 
-	//save current channel rtmp url and rtmp stream key
-	PLS_PLATFORM_API->saveStreamSettings(getNameForSettingId(), getStreamServer(), getStreamKey());
+	list<PLSPlatformBase *> platforms = pls_is_dual_output_on() && isVerticalOutput() ? PLS_PLATFORM_API->getVerticalPlatforms() : PLS_PLATFORM_API->getHorizontalPlatforms();
 
-	//Find the current platform pointer in all platforms of live broadcast
-	auto platforms = PLS_PLATFORM_API->getActivePlatforms();
+	if (getServiceType() == PLSServiceType::ST_CUSTOM) {
+		QString rtmpId = mySharedData().m_mapInitData[ChannelData::g_rtmpUserID].toString();
+		QString rtmpPassword = mySharedData().m_mapInitData[ChannelData::g_password].toString();
+		PLS_PLATFORM_API->saveStreamSettings(getNameForSettingId(), getStreamServer(), getStreamKey(), isVerticalOutput(), rtmpId, rtmpPassword);
+	} else {
+		PLS_PLATFORM_API->saveStreamSettings(getNameForSettingId(), getStreamServer(), getStreamKey(), isVerticalOutput());
+	}
+
 	auto iter = find(platforms.begin(), platforms.end(), this);
 
-	//call the onPrepareLive method of the next platform
 	if (iter != platforms.end() && ++iter != platforms.end()) {
 		(*iter)->onPrepareLive(value);
 	} else {
-		PLS_PLATFORM_PRSIM->onPrepareLive(value);
+		if (pls_is_dual_output_on() && isHorizontalOutput()) {
+			PLS_PLATFORM_API->getVerticalPlatforms().front()->onPrepareLive(true);
+		} else {
+			PLS_PLATFORM_API->prepareLiveCallback(value);
+		}
 	}
 }
 
@@ -251,6 +265,8 @@ QJsonObject PLSPlatformBase::getWebChatParams()
 
 	platform.insert("name", QString::fromStdString(getNameForLiveStart()));
 	platform.insert("accessToken", getChannelToken());
+	platform.insert("videoSeq",
+			pls_is_dual_output_on() && isVerticalOutput() ? PLS_PLATFORM_PRSIM->getVideoSeq(DualOutputType::Vertical) : PLS_PLATFORM_PRSIM->getVideoSeq(DualOutputType::Horizontal));
 
 	return platform;
 }

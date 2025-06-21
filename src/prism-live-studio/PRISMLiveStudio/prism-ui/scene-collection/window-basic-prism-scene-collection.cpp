@@ -11,8 +11,14 @@
 #include "PLSImporter.h"
 #include "PLSPrismShareMemory.h"
 #include "pls/pls-obs-api.h"
+#include "PLSNodeManager.h"
+#include "ResolutionGuidePage.h"
+#include "PLSChannelDataAPI.h"
+#include "PLSPlatformApi.h"
 
 #include <QCryptographicHash>
+
+using namespace std;
 
 static const std::vector<QString> appSupportSuffix = {".json", ".psc", ".bpres", ".xml", ".xconfig"};
 static constexpr const char *PRISM_APP_DEFAULT_SUFFIX = ".psc";
@@ -46,7 +52,14 @@ void EnumSceneCollections(const std::function<bool(const char *, const char *)> 
 
 	for (const auto &fileInfo : fileInfoList) {
 		auto filePath = path + fileInfo.fileName();
-		obs_data_t *data = obs_data_create_from_json_file_safe(filePath.toStdString().c_str(), "bak");
+		obs_data_t *data = nullptr;
+		try {
+			data = obs_data_create_from_json_file_safe(filePath.toStdString().c_str(), "bak");
+		} catch (...) {
+			PLS_WARN(MAINMENU_MODULE, "get scene collection json exception : %s", filePath.toStdString().c_str());
+			assert(false);
+		}
+
 		std::string name = obs_data_get_string(data, "name");
 		/* if no name found, use the file name as the name
 		 * (this only happens when switching to the new version) */
@@ -147,6 +160,8 @@ void OBSBasic::on_actionRemoveSceneCollection_triggered(const QString &name, con
 	if (PLSAlertView::Button::Ok != button) {
 		return;
 	}
+	if (api)
+		api->on_event(obs_frontend_event::OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING);
 
 	sceneCollectionView->RemoveCollectionItem(name, path);
 	sceneCollectionManageView->RemoveSceneCollection(name, path);
@@ -225,6 +240,11 @@ void OBSBasic::on_actionImportFromOtherSceneCollection_triggered()
 
 void OBSBasic::on_actionChangeSceneCollection_triggered(const QString &name, const QString &path, bool textMode)
 {
+	if (m_startChangeSceneCollection) {
+		return;
+	}
+	m_startChangeSceneCollection = true;
+	PLS_INFO(MAIN_SCENE_COLLECTION, "Start to switch scene collection : %s", name.toStdString().c_str());
 	sceneCollectionManageTitle->SetText(name);
 	sceneCollectionManageView->SetCurrentText(name, path);
 	sceneCollectionView->SetCurrentText(name, path);
@@ -237,6 +257,11 @@ void OBSBasic::on_actionChangeSceneCollection_triggered(const QString &name, con
 
 	config_set_string(App()->GlobalConfig(), "Basic", "SceneCollection", name.toUtf8().constData());
 	config_set_string(App()->GlobalConfig(), "Basic", "SceneCollectionFile", ExtractFileName(path.toStdString()).c_str());
+
+	if (ui && ui->scenesFrame) {
+		EnableTransitionWidgets(true);
+	}
+	m_startChangeSceneCollection = false;
 }
 
 QVector<QString> OBSBasic::GetSceneCollections() const
@@ -409,13 +434,16 @@ void OBSBasic::LoadSceneCollection(QString name, QString filePath)
 	if (filePath.isEmpty() || name.isEmpty())
 		return;
 
-	if (api)
+	if (api) {
 		api->on_event(pls_frontend_event::PLS_FRONTEND_EVENT_SCENE_COLLECTION_ABOUT_TO_CHANGED);
+		api->on_event(obs_frontend_event::OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING);
+	}
 
 	const char *oldName = config_get_string(App()->GlobalConfig(), "Basic", "SceneCollection");
 	const char *oldFile = config_get_string(App()->GlobalConfig(), "Basic", "SceneCollectionFile");
 
 	if (QString file = ExtractFileName(filePath.toStdString()).c_str(); name.compare(QT_UTF8(oldName)) == 0 && file.compare(QT_UTF8(oldFile)) == 0 && GetCurrentScene()) {
+		PLS_INFO(MAIN_SCENE_COLLECTION, "The scene set to be switched is the same and does not need to be switched.");
 		return;
 	}
 
@@ -614,11 +642,22 @@ void OBSBasic::on_actionImportSceneCollection_triggered_with_parent(QWidget *par
 	QString fileFilter = "JSON Files (";
 	fileFilter += suffix;
 	fileFilter += ")";
-
+	bool supportExportTemplates = pls_prism_get_qsetting_value("SupportExportTemplates").toBool();
+	if (supportExportTemplates) {
+		fileFilter += ";; Overlay Files (";
+		fileFilter += "*";
+		fileFilter += OVERLAY_FILE;
+		fileFilter += ")";
+	}
+	pls::HotKeyLocker locker;
 	QString qfilePath = QFileDialog::getOpenFileName(parent, QTStr("Basic.MainMenu.SceneCollection.Import"), lastCollectionPath, fileFilter);
 	if (!qfilePath.isEmpty() && !qfilePath.isNull()) {
 		lastCollectionPath = qfilePath.mid(0, qfilePath.lastIndexOf("/"));
-		ImportSceneCollection(parent, qfilePath, LoadSceneCollectionWay::ImportSceneCollection);
+		if (qfilePath.endsWith(OVERLAY_FILE)) {
+			importLocalSceneTemplate(qfilePath);
+		} else {
+			ImportSceneCollection(parent, qfilePath, LoadSceneCollectionWay::ImportSceneCollection);
+		}
 	}
 }
 
@@ -626,12 +665,12 @@ QString OBSBasic::ImportSceneCollection(QWidget *parent, const QString &importFi
 {
 	pls::chars<512> path;
 	if (int ret = GetConfigPath(path, 512, "PRISMLiveStudio/basic/scenes/"); ret <= 0) {
-		PLS_WARN(MAINMENU_MODULE, "Failed to get scene collection config path");
+		PLS_WARN(MAINFRAME_MODULE, "Failed to get scene collection config path");
 		return QString();
 	}
 
 	if (importFile.isEmpty() || importFile.isNull()) {
-		PLS_WARN(MAINMENU_MODULE, "Failed to get scene collection import file");
+		PLS_WARN(MAINFRAME_MODULE, "Failed to get scene collection import file");
 		return QString();
 	}
 
@@ -689,6 +728,10 @@ QString OBSBasic::ImportSceneCollection(QWidget *parent, const QString &importFi
 	} else {
 		sceneCollectionView->AddSceneCollectionItem(importedName.c_str(), destPath.c_str());
 	}
+
+	if (way == LoadSceneCollectionWay::ImportSceneTemplates) {
+		sceneCollectionView->close();
+	}
 	sceneCollectionManageView->AddSceneCollection(importedName.c_str(), destPath.c_str());
 
 	if (!fromExport)
@@ -700,6 +743,275 @@ QString OBSBasic::ImportSceneCollection(QWidget *parent, const QString &importFi
 	}
 
 	return destPath.c_str();
+}
+
+bool OBSBasic::importLocalSceneTemplate(const QString &overlayFile)
+{
+	QFileInfo info(overlayFile);
+	QString templateName = info.baseName();
+
+	QString dataPath = PLSNodeManagerPtr->getConfigDataPath();
+	dataPath.append(templateName).append(QDir::separator());
+
+	QString error;
+	if (!pls::rsm::unzip(overlayFile, dataPath, false, &error)) {
+		pls_alert_warning("importSceneTemplate", QString("unzip %1.overlay file error : %2").arg(templateName).arg(error).toStdString().c_str());
+		return false;
+	}
+
+	QString configPath;
+	auto path = pls_find_subdir_contains_spec_file(dataPath, QStringLiteral("config.json"));
+	if (path) {
+		configPath = path.value();
+	}
+
+	return importSceneTemplate(std::make_tuple(QString(), templateName, configPath, QString(), 0, 0), false);
+}
+
+bool OBSBasic::importSceneTemplate(const std::tuple<QString, QString, QString, QString, int, int> &model, bool checkResolution)
+{
+	if (get<1>(model).isEmpty() || get<2>(model).isEmpty()) {
+		PLSAlertView::information(this, QTStr("Alert.Title"), QTStr("SceneTemplate.Install.Common.Error"));
+		return false;
+	}
+
+	QString versionLimit = get<3>(model);
+	auto trimmedStr = [&versionLimit](const char *str) {
+		auto index = versionLimit.indexOf(str);
+		if (index >= 0) {
+			versionLimit = versionLimit.mid(index + strlen(str)).trimmed();
+		}
+	};
+
+	auto checkTrimmedStr = [trimmedStr, &versionLimit]() {
+		if (versionLimit.startsWith(">=")) {
+			trimmedStr(">=");
+		} else if (versionLimit.startsWith(">")) {
+			trimmedStr(">");
+		}
+	};
+
+	if (!checkSceneTemplateVersion(versionLimit)) {
+		checkTrimmedStr();
+		showSceneTemplateVersionLowerAlert(versionLimit);
+		return false;
+	}
+
+	// check resolution when import scene template
+	if (checkResolution && !checkSceneTemplateResolution(model)) {
+		return false;
+	}
+
+	QString collectionPath;
+	auto res = PLSNodeManagerPtr->loadConfig(get<1>(model), get<2>(model), collectionPath);
+	if (res == NodeErrorType::Ok) {
+		collectionPath = ImportSceneCollection(this, collectionPath, LoadSceneCollectionWay::ImportSceneTemplates);
+		if (collectionPath.isEmpty()) {
+			PLSAlertView::information(this, QTStr("Alert.Title"), QTStr("SceneTemplate.Install.Common.Error"));
+			return false;
+		}
+		if (checkResolution) {
+			PLS_LOGEX(PLS_LOG_INFO, MAINFRAME_MODULE, {{"sceneTemplateId", get<0>(model).toStdString().c_str()}}, "install %s scene template success.",
+				  get<1>(model).toStdString().c_str());
+			PLS_PLATFORM_API->sendSceneTemplateAnalog({{"templateId", get<0>(model)}});
+		}
+
+		// create audio mixer when import scene templates
+		CreateFirstRunSources();
+		return true;
+	}
+
+	if (res == NodeErrorType::UnregisterNode || res == NodeErrorType::SourceNotRegistered) {
+		checkTrimmedStr();
+		showSceneTemplateVersionLowerAlert(versionLimit);
+	} else {
+		PLSAlertView::information(this, QTStr("Alert.Title"), QTStr("SceneTemplate.Install.Common.Error"));
+	}
+	return false;
+}
+
+bool OBSBasic::checkSceneTemplateResolution(const std::tuple<QString, QString, QString, QString, int, int> &model)
+{
+	uint64_t cx = config_get_uint(Config(), "Video", "BaseCX");
+	uint64_t cy = config_get_uint(Config(), "Video", "BaseCY");
+	uint64_t fps = config_get_uint(Config(), "Video", "FPSInt");
+
+	float baseScale = (float)((float)cx / (float)cy);
+	float TemplateScale = (float)((float)get<4>(model) / (float)get<5>(model));
+	bool isEqual = qAbs(baseScale - TemplateScale) < EPSILON;
+	if (isEqual) {
+		return true;
+	}
+	QString text;
+	bool isHorizontal = get<4>(model) > get<5>(model);
+	if (isHorizontal) {
+		text = QTStr("SceneTemplate.Horizontal.Template");
+	} else {
+		text = QTStr("SceneTemplate.Vertical.Template");
+	}
+
+	PLSAlertView::Button button = PLSAlertView::information(
+		this, QTStr("Alert.title"), text, {{PLSAlertView::Button::Yes, QTStr("SceneTemplate.Change.resolution")}, {PLSAlertView::Button::Cancel, QTStr("SceneTemplate.Keep.resolution")}},
+		PLSAlertView::Button::Yes);
+	if (button == PLSAlertView::Button::Yes) {
+		QString text;
+		if (obs_video_active()) {
+			if (PLSCHANNELS_API->isLivingOrRecording() && VirtualCamActive()) {
+				text = QTStr("Resolution.InputIsActived");
+			} else if (VirtualCamActive()) {
+				text = QTStr("Resolution.VirtualCamIsActived");
+			} else {
+				text = QTStr("Resolution.InputIsActived");
+			}
+			OBSMessageBox::information(this, QTStr("Alert.Title"), text);
+			return false;
+		}
+
+		ResolutionGuidePage::setResolution(get<4>(model), get<5>(model), fps);
+	}
+	return true;
+}
+
+bool OBSBasic::checkSceneTemplateVersion(QString versionLimit)
+{
+	if (versionLimit.isEmpty()) {
+		return true;
+	}
+	auto plsVersion = QVersionNumber(pls_get_prism_version_major(), pls_get_prism_version_minor(), pls_get_prism_version_patch());
+	auto bMatch = pls_check_version(versionLimit.toUtf8(), plsVersion);
+	if (!bMatch.has_value()) {
+		PLS_WARN(SCENE_TEMPLATE, "scene template item version: %s is a wrong format", qUtf8Printable(versionLimit));
+		return false;
+	} else {
+		return bMatch.value();
+	}
+}
+
+void OBSBasic::showSceneTemplateVersionLowerAlert(QString versionLimit)
+{
+	PLSAlertView::Button button = PLSAlertView::question(this, QTStr("Alert.Title"), QTStr("SceneTemplate.Install.Source.Not.Found.Error").arg(versionLimit),
+							     {{PLSAlertView::Button::Ok, QObject::tr("Update.Bottom.Force.Button.Text")}, {PLSAlertView::Button::Cancel, QObject::tr("Cancel")}},
+							     PLSAlertView::Button::Cancel);
+	if (PLSAlertView::Button::Ok == button) {
+		// app need update
+		PLSBasic::instance()->startDownloading();
+	}
+}
+
+static bool enumSceneItem(obs_scene_t *, obs_sceneitem_t *item, void *param)
+{
+	obs_source_t *source = obs_sceneitem_get_source(item);
+	const char *name = obs_source_get_name(source);
+	const char *id = obs_source_get_id(source);
+	PLSNodeManager::SceneItemUuidMap &uuidMap = *static_cast<PLSNodeManager::SceneItemUuidMap *>(param);
+
+	QString uuid = pls_gen_uuid();
+	uuidMap.insert((int64_t)item, uuid);
+
+	if (obs_sceneitem_is_group(item)) {
+		obs_sceneitem_group_enum_items(item, enumSceneItem, &uuidMap);
+	}
+
+	return true;
+}
+
+struct SourceUuidMap {
+	PLSNodeManager::SceneItemUuidMap sceneItemUuidMap;
+	PLSNodeManager::SceneUuidMap sceneUuidMap;
+};
+
+bool enum_all_scenes_callback(void *param, obs_source_t *src)
+{
+	SourceUuidMap &uuidMap = *static_cast<SourceUuidMap *>(param);
+	obs_scene_t *scene = obs_scene_from_source(src);
+	if (scene) {
+		obs_source_t *source = obs_scene_get_source(scene);
+		const char *name = obs_source_get_name(source);
+
+		QString uuid = pls_gen_uuid();
+		uuidMap.sceneUuidMap.insert(name, uuid);
+		obs_scene_enum_items(scene, enumSceneItem, &uuidMap.sceneItemUuidMap);
+	}
+	return true;
+}
+
+bool OBSBasic::exportSceneTemplate(const QString &overlayFile)
+{
+	connect(
+		PLSNodeManagerPtr, &PLSNodeManager::zipFinished, this,
+		[this](bool result) { PLSAlertView::information(this, QTStr("Alert.Title"), QString("Export scene template %1").arg(result ? "success" : "failed")); }, Qt::SingleShotConnection);
+
+	SourceUuidMap suuidMap;
+	obs_enum_scenes(enum_all_scenes_callback, &suuidMap);
+
+	PLSNodeManagerPtr->setSceneItemUuidInfo(suuidMap.sceneItemUuidMap);
+	PLSNodeManagerPtr->setSceneUuidInfo(suuidMap.sceneUuidMap);
+
+	QString templateName = overlayFile.mid(overlayFile.lastIndexOf("/") + 1);
+	templateName = templateName.mid(0, templateName.lastIndexOf("."));
+
+	QString templatePath = overlayFile.mid(0, overlayFile.lastIndexOf("/") + 1);
+
+	OBSDataAutoRelease settings = obs_data_create();
+	OBSDataAutoRelease priSettings = obs_data_create();
+	QJsonObject outputObject;
+	PLSNodeManagerPtr->setExportDir(templatePath);
+	PLSNodeManagerPtr->setExportName(templateName);
+	PLSNodeManagerPtr->exportLoadInfo(settings, priSettings, SNodeType::RootNode, outputObject);
+	if (PLSNodeManagerPtr->doCopyFinished()) {
+		PLSNodeManagerPtr->doZip(templateName);
+	}
+	return true;
+}
+
+static bool findUpdateSceneItem(obs_scene_t *, obs_sceneitem_t *item, void *param)
+{
+	auto source = obs_sceneitem_get_source(item);
+	if (!source) {
+		return true;
+	}
+	bool &dst = *reinterpret_cast<bool *>(param);
+	if (PLSNodeManagerPtr->checkSourceHasUpgrade(obs_source_get_id(source))) {
+		dst = true;
+		return false;
+	}
+
+	if (obs_sceneitem_is_group(item)) {
+		obs_sceneitem_group_enum_items(item, findUpdateSceneItem, param);
+	}
+
+	return true;
+};
+
+static bool findUpdatedSource()
+{
+	bool sourceHasUpdated = false;
+
+	auto cb = [](void *param, obs_source_t *src) {
+		obs_scene_t *sceneSource = obs_scene_from_source(src);
+		if (sceneSource) {
+			obs_scene_enum_items(sceneSource, findUpdateSceneItem, param);
+		}
+		return true;
+	};
+	obs_enum_scenes(cb, &sourceHasUpdated);
+	return sourceHasUpdated;
+}
+
+void OBSBasic::checkSceneTemplateSourceUpdate(obs_data_t *data)
+{
+	if (!data) {
+		return;
+	}
+	if (!obs_data_has_user_value(data, FROM_SCENE_TEMPLATE)) {
+		fromSceneTemplate = true;
+	} else {
+		fromSceneTemplate = obs_data_get_bool(data, FROM_SCENE_TEMPLATE);
+	}
+	if (fromSceneTemplate && findUpdatedSource()) {
+		PLSBasic::instance()->setAlertParentWithBanner(
+			[this](QWidget *parent) { pls_async_call(this, [parent]() { PLSAlertView::warning(parent, tr("Alert.Title"), QTStr("SceneTemplate.Install.Source.Has.Update.Tip")); }); });
+	}
 }
 
 void OBSBasic::ExportSceneCollection(const QString &name, const QString &fileName, QWidget *parent, bool import_scene, ExprotCallback callback)
@@ -721,9 +1033,20 @@ void OBSBasic::ExportSceneCollection(const QString &name, const QString &fileNam
 	fileFilter += ";;";
 	fileFilter += QString("JSON Files (*%1)").arg(".json");
 
-	QString exportFile = QFileDialog::getSaveFileName(parent, QTStr("Basic.MainMenu.SceneCollection.Export"), lastCollectionPath + "/" + fileName, fileFilter);
+	bool supportExportTemplates = pls_prism_get_qsetting_value("SupportExportTemplates").toBool();
+	if (supportExportTemplates) {
+		fileFilter += ";;";
+		fileFilter += QString("Overlay Files (*%1)").arg(OVERLAY_FILE);
+	}
+
+	pls::HotKeyLocker locker;
+	QString exportFile = QFileDialog::getSaveFileName(parent, QTStr("Scene.Collection.Export"), lastCollectionPath + "/" + fileName, fileFilter);
 	if (!exportFile.isEmpty() && !exportFile.isNull()) {
-		OnSelectExportFile(exportFile, QT_UTF8(scenePath.data()), fileName, callback, import_scene);
+		if (exportFile.endsWith(OVERLAY_FILE)) {
+			exportSceneTemplate(exportFile);
+		} else {
+			OnSelectExportFile(exportFile, QT_UTF8(scenePath.data()), fileName, callback, import_scene);
+		}
 	}
 }
 
@@ -734,11 +1057,35 @@ void OBSBasic::OnSelectExportFile(const QString &exportFile, const QString &path
 	std::string file = QT_TO_UTF8(exportFile);
 
 	if (!exportFile.isEmpty() && !exportFile.isNull()) {
-		lastCollectionPath = exportFile.mid(0, exportFile.lastIndexOf("/"));
-		if (QFile::exists(exportFile))
-			QFile::remove(exportFile);
+		QString inputFile = path + currentFile + ".json";
 
-		QFile::copy(path + currentFile + ".json", exportFile);
+		OBSDataAutoRelease collection = obs_data_create_from_json_file(QT_TO_UTF8(inputFile));
+
+		OBSDataArrayAutoRelease sources = obs_data_get_array(collection, "sources");
+		if (!sources) {
+			blog(LOG_WARNING, "No sources in exported scene collection");
+			return;
+		}
+		obs_data_erase(collection, "sources");
+
+		// We're just using std::sort on a vector to make life easier.
+		std::vector<OBSData> sourceItems;
+		obs_data_array_enum(
+			sources,
+			[](obs_data_t *data, void *pVec) -> void {
+				auto &sourceItems = *static_cast<std::vector<OBSData> *>(pVec);
+				sourceItems.push_back(data);
+			},
+			&sourceItems);
+
+		std::sort(sourceItems.begin(), sourceItems.end(), [](const OBSData &a, const OBSData &b) { return astrcmpi(obs_data_get_string(a, "name"), obs_data_get_string(b, "name")) < 0; });
+
+		OBSDataArrayAutoRelease newSources = obs_data_array_create();
+		for (auto &item : sourceItems)
+			obs_data_array_push_back(newSources, item);
+
+		obs_data_set_array(collection, "sources", newSources);
+		obs_data_save_json_pretty_safe(collection, QT_TO_UTF8(exportFile), "tmp", "bak");
 	}
 	if (import_scene && !exportFile.isEmpty())
 		ImportSceneCollection(this, exportFile, LoadSceneCollectionWay::ImportSceneCollectionFromExport, true);

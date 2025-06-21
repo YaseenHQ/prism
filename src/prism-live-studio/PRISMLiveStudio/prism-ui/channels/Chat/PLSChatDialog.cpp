@@ -15,8 +15,13 @@
 #include "PLSMainView.hpp"
 #include "log/log.h"
 
+#include <PLSBrowserPanel.h>
+#include <qjsonarray.h>
+#include <qjsondocument.h>
+#include "PLSSyncServerManager.hpp"
 #include "pls-common-define.hpp"
 
+#include "PLSWatchers.h"
 #include "libbrowser.h"
 #include "prism/PLSPlatformPrism.h"
 #include "ui_PLSChatDialog.h"
@@ -33,7 +38,7 @@ static const char *const s_maxName = "MaximizedState";
 static const char *const s_hiddenSection = "Basic";
 static const char *const s_hiddenName = "chatIsHidden";
 
-extern QCef *cef;
+extern PLSQCef *plsCef;
 
 namespace {
 //PRISM/Zhangdewen/20200921/#/add chat source button
@@ -43,7 +48,16 @@ class ChatSourceButton : public QFrame {
 	std::function<void()> clicked;
 
 public:
-	ChatSourceButton(const QString &buttonText, QWidget *parent, std::function<void()> clicked_) : QFrame(parent), clicked(std::move(clicked_))
+	void updateTextWidth(int moreWidth)
+	{
+		QFontMetrics fontWidth(m_text->font());
+		QString elidedText = fontWidth.elidedText(m_showStr, Qt::ElideRight, qMax(m_text->size().width() + moreWidth - 10, 0));
+		if (elidedText == "…") {
+			elidedText = "";
+		}
+		m_text->setText(elidedText);
+	}
+	ChatSourceButton(const QString &buttonText, QWidget *parent, std::function<void()> clicked_) : QFrame(parent), clicked(std::move(clicked_)), m_showStr(buttonText)
 	{
 		pls_add_css(this, {"ChatSourceButton"});
 		setObjectName("chatSourceButton");
@@ -59,6 +73,7 @@ public:
 		text->setObjectName("chatSourceButtonText");
 		text->setMouseTracking(true);
 		text->setText(buttonText);
+		m_text = text;
 
 		QHBoxLayout *layout = pls_new<QHBoxLayout>(this);
 		layout->setContentsMargins(10, 0, 10, 0);
@@ -69,6 +84,9 @@ public:
 	~ChatSourceButton() override = default;
 
 private:
+	QLabel *m_text;
+	QString m_showStr;
+
 	void setState(const char *name, bool &state, bool value)
 	{
 		if (state != value) {
@@ -120,26 +138,55 @@ PLSChatDialog::PLSChatDialog(QWidget *parent) : QWidget(parent)
 	connect(
 		PLS_PLATFORM_API, &PLSPlatformApi::platformActiveDone, this, [this]() { refreshUI(); }, Qt::QueuedConnection);
 	connect(
-		PLSCHANNELS_API, &PLSChannelDataAPI::sigAllChannelRefreshDone, this, [this]() { refreshUI(); }, Qt::QueuedConnection);
+		PLSCHANNELS_API, &PLSChannelDataAPI::sigOperationChannelDone, this,
+		[this]() {
+			pls_check_app_exiting();
+			refreshUI();
+			updateTabBtnCss();
+		},
+		Qt::QueuedConnection);
 
 	connect(
 		PLS_PLATFORM_API, &PLSPlatformApi::liveStarted, this,
 		[this](bool isSucceed) {
+			pls_check_app_exiting();
 			updateRtmpPlaceText();
 			if (isSucceed) {
 				showToastIfNeeded();
 				updateYoutubeUrlIfNeeded();
+				PLSBasic::setManualPannelCookies(ALL_CHAT);
 			}
 		},
 		Qt::QueuedConnection);
 	connect(
 		PLS_PLATFORM_API, &PLSPlatformApi::liveEnded, this,
 		[this]() {
-			PLS_INFO(MODULE_PlatformService, "live end chat view refresh ui");
+			PLS_INFO(s_chatModuleName, "live end chat view refresh ui");
 			refreshUI();
 			m_bShowToastAgain = false;
 		},
 		Qt::QueuedConnection);
+
+	connect(PLS_SYNC_SERVER_MANAGE, &PLSSyncServerManager::libraryNeedUpdate, this, [this](bool isSucceed) {
+		pls_check_app_exiting();
+		if (!isSucceed) {
+			PLS_INFO(s_chatModuleName, "chat all page download failed, maybe the chat page is loaded older.");
+			return;
+		}
+		PLS_INFO(s_chatModuleName, "chat all page download succeed, to force update chat all page url");
+		auto size = m_vecChatDatas.size();
+		for (int index = 0; index < size; ++index) {
+			QVariantMap info;
+			PLS_CHAT_HELPER->getSelectInfoFromIndex(index, info);
+			std::string newUrl = PLS_CHAT_HELPER->getChatUrlWithIndex(index, info);
+			m_vecChatDatas[index].url = newUrl;
+			if (m_vecChatDatas[index].isWebLoaded) {
+				setupNewUrl(index, newUrl, true);
+				PLS_INFO(s_chatModuleName, "chat page is webloaded");
+			}
+			PLS_INFO(s_chatModuleName, "force update chat %s page, chat index = %d", PLS_CHAT_HELPER->getPlatformNameFromIndex(index).toUtf8().constData(), index);
+		}
+	});
 
 	this->installEventFilter(this);
 
@@ -205,15 +252,15 @@ void PLSChatDialog::setupFirstUI()
 		connect(tapButton, &QPushButton::clicked, [this, i]() {
 			auto _index = i;
 			PLS_UI_STEP(s_chatModuleName, QString("PLSChat Dialog Tab Click To Index %1").arg(PLS_CHAT_HELPER->getString(_index)).toUtf8().constData(), ACTION_CLICK);
-			changedSelectIndex(_index);
+			changedSelectIndex(_index, true);
 		});
 		ui->scrollAreaWidgetContents->layout()->addWidget(tapButton);
 		tapButton->setHidden(true);
 		string showUrl = PLS_CHAT_HELPER->getChatUrlWithIndex(i, QVariantMap());
 		m_vecChatDatas.push_back({widget, tapButton, showUrl});
 
-		if (i != ChatPlatformIndex::All && i != ChatPlatformIndex::RTMP && i != ChatPlatformIndex::UnDefine) {
-			tapButton->setStyleSheet(PLS_CHAT_HELPER->getTabButtonCss(objectName, smallName));
+		if (i != ChatPlatformIndex::RTMP && i != ChatPlatformIndex::UnDefine) {
+			tapButton->setStyleSheet(PLS_CHAT_HELPER->getTabButtonCss(objectName, smallName, PLS_CHAT_HELPER->getString(i)));
 		} else {
 			tapButton->setText(PLS_CHAT_HELPER->getString(i));
 		}
@@ -234,36 +281,16 @@ void PLSChatDialog::refreshUI()
 		return;
 	}
 
-	bool facebookExisted = PLS_PLATFORM_API->isPlatformExisted(PLSServiceType::ST_FACEBOOK);
-	if (facebookExisted && !facebookPrivateConn) {
-		facebookPrivateConn = connect(PLS_PLATFORM_FACEBOOK, &PLSPlatformFacebook::privateChatChanged, this, &PLSChatDialog::facebookPrivateChatChanged, Qt::QueuedConnection);
+	if (PLS_PLATFORM_API->isPlatformExisted(PLSServiceType::ST_FACEBOOK)) {
+		connect(PLS_PLATFORM_FACEBOOK, &PLSPlatformFacebook::privateChatChanged, this, &PLSChatDialog::facebookPrivateChatChanged,
+			Qt::ConnectionType(Qt::QueuedConnection | Qt::UniqueConnection));
 	}
 
-	bool youtubeExisted = PLS_PLATFORM_API->isPlatformExisted(PLSServiceType::ST_YOUTUBE);
-	if (youtubeExisted && !youtubeIDConn) {
-		youtubeIDConn = connect(
-			PLS_PLATFORM_YOUTUBE, &PLSPlatformYoutube::selectIDChanged, this, [this]() { refreshUI(); }, Qt::QueuedConnection);
-		connect(
-			PLS_PLATFORM_YOUTUBE, &PLSPlatformYoutube::kidsChangedToOther, this,
-			[this]() {
-				QTimer::singleShot(1000, PLS_PLATFORM_YOUTUBE, [this] {
-					PLS_INFO(MODULE_PlatformService, "youtube signal kidsChangedToOther emited");
-					updateYoutubeUrlIfNeeded(true);
-				});
-			},
-			Qt::QueuedConnection);
+	if (PLS_PLATFORM_API->isPlatformExisted(PLSServiceType::ST_YOUTUBE)) {
+		QObject::connect(PLS_PLATFORM_YOUTUBE, &PLSPlatformYoutube::selectIDChanged, this, &PLSChatDialog::refreshUI, Qt::ConnectionType(Qt::QueuedConnection | Qt::UniqueConnection));
+		QObject::connect(PLS_PLATFORM_YOUTUBE, &PLSPlatformYoutube::privateChangedToOther, this, &PLSChatDialog::youtubePrivateChange,
+				 Qt::ConnectionType(Qt::QueuedConnection | Qt::UniqueConnection));
 	}
-	if (youtubeExisted && !youtubePrivateConn) {
-		youtubePrivateConn = connect(
-			PLS_PLATFORM_YOUTUBE, &PLSPlatformYoutube::privateChangedToOther, this,
-			[this]() {
-				m_bRefeshYoutubeChat = true;
-				PLS_INFO(MODULE_PlatformService, "youtube signal privateChangedToOther emited");
-				updateYoutubeUrlIfNeeded(true);
-			},
-			Qt::QueuedConnection);
-	}
-
 	updateRtmpPlaceText();
 	if (!m_isForceRefresh && PLS_PLATFORM_API->isLiving()) {
 		return;
@@ -274,6 +301,7 @@ void PLSChatDialog::refreshUI()
 	refreshTabButtonCount();
 	hideOrShowTabButton();
 	updateTabPolicy();
+	updateTopAddSourceText();
 	for (int i = 0; i < m_vecChatDatas.size(); i++) {
 		const ChatDatas &data = m_vecChatDatas[i];
 		if (data.isWebLoaded && data.button->isHidden()) {
@@ -364,9 +392,11 @@ int PLSChatDialog::foundFirstShowedButton()
 	return index;
 }
 
-void PLSChatDialog::changedSelectIndex(int index)
+void PLSChatDialog::changedSelectIndex(int index, bool isClicked)
 {
-	if (m_selectIndex == index) {
+	bool isSameIndex = m_selectIndex == index;
+	if (isSameIndex && isClicked) {
+		//when isClicked == false, need force reload style sheet
 		return;
 	}
 	setSelectIndex(index);
@@ -385,6 +415,9 @@ void PLSChatDialog::changedSelectIndex(int index)
 		button->style()->unpolish(button);
 		button->style()->polish(button);
 	}
+	if (isSameIndex) {
+		return;
+	}
 	PLS_INFO(s_chatModuleName, QString("PLSChat Dialog Tab Switch To Index %1").arg(PLS_CHAT_HELPER->getString(index)).toUtf8().constData());
 
 	//PRISM/Zhangdewen/20201021/#5310/switch delay
@@ -399,26 +432,21 @@ void PLSChatDialog::changedSelectIndex(int index)
 	}
 
 	auto _selIndex = m_selectIndex;
-	QMetaObject::invokeMethod(
-		this,
-		[this, _selIndex]() {
-			if (this->m_vecChatDatas.empty()) {
-				return;
-			}
-			auto &data = this->m_vecChatDatas[_selIndex];
-			QPointer<QWidget> ce = data.widget;
-			if (ce == nullptr && PLS_CHAT_HELPER->isCefWidgetIndex(_selIndex) && !data.isWebLoaded) {
+	if (this->m_vecChatDatas.empty()) {
+		return;
+	}
+	auto &data = this->m_vecChatDatas[_selIndex];
+	QPointer<QWidget> ce = data.widget;
+	if (ce == nullptr && PLS_CHAT_HELPER->isCefWidgetIndex(_selIndex) && !data.isWebLoaded) {
 
-				data.isWebLoaded = true;
-				data.widget = createANewCefWidget(data.url, _selIndex);
-				ce = data.widget;
-			}
-			if (ce == nullptr) {
-				return;
-			}
-			switchStackWidget(_selIndex);
-		},
-		Qt::QueuedConnection);
+		data.isWebLoaded = true;
+		data.widget = createANewCefWidget(data.url, _selIndex);
+		ce = data.widget;
+	}
+	if (ce == nullptr) {
+		return;
+	}
+	switchStackWidget(_selIndex);
 }
 
 void PLSChatDialog::setupFirstRtmpUI(QWidget *parent)
@@ -481,9 +509,12 @@ void PLSChatDialog::setupNewUrl(int index, const string &url, bool forceSet)
 
 	//set url again, sometimes set new url, the cef will not refresh, so set it again.
 	//the cef init will cause some time, when init not complected, set url will failed.
-	QTimer::singleShot(100, ce, [ce, url] { ce->setURL(url); });
-	PLS_INFO(s_chatModuleName, "PLSChat Dialog %s set new url", PLS_CHAT_HELPER->getString(index));
-	PLS_INFO_KR(s_chatModuleName, "PLSChat Dialog %s set new url: %s", PLS_CHAT_HELPER->getString(index), url.c_str());
+	QTimer::singleShot(100, ce, [ce, url] {
+		PLS_INFO(s_chatModuleName, "PLSChat Dialog setupNewUrl with singleShot");
+		ce->setURL(url);
+	});
+	PLS_INFO(s_chatModuleName, "PLSChat Dialog %s set new url", PLS_CHAT_HELPER->getString(index).toUtf8().constData());
+	PLS_INFO_KR(s_chatModuleName, "PLSChat Dialog %s set new url: %s", PLS_CHAT_HELPER->getString(index).toUtf8().constData(), url.c_str());
 }
 
 int PLSChatDialog::rtmpChannelCount() const
@@ -501,25 +532,25 @@ int PLSChatDialog::rtmpChannelCount() const
 	return count;
 }
 
-QCefWidget *PLSChatDialog::createANewCefWidget(const string &url, int index)
+PLSQCefWidget *PLSChatDialog::createANewCefWidget(const string &url, int index)
 {
 	if (!PLS_CHAT_HELPER->isCefWidgetIndex(index)) {
 		return nullptr;
 	}
-	if (cef == nullptr) {
-		PLS_INFO(s_chatModuleName, "PLSChat Dialog %s create cef with new url, but failed, the cef is nullptr", PLS_CHAT_HELPER->getString(index));
+	if (plsCef == nullptr) {
+		PLS_INFO(s_chatModuleName, "PLSChat Dialog %s create cef with new url, but failed, the cef is nullptr", PLS_CHAT_HELPER->getString(index).toUtf8().constData());
 		return nullptr;
 	}
-	PLS_INFO(s_chatModuleName, "PLSChat Dialog %s create cef with new url", PLS_CHAT_HELPER->getString(index));
+	PLS_INFO(s_chatModuleName, "PLSChat Dialog %s create cef with new url", PLS_CHAT_HELPER->getString(index).toUtf8().constData());
 
-	QCefWidget *cefWidget = nullptr;
+	PLSQCefWidget *cefWidget = nullptr;
 
 	auto name = PLS_CHAT_HELPER->getPlatformNameFromIndex(index);
 	if (index == ChatPlatformIndex::All) {
-		name = NAVER_TV;
+		name = ALL_CHAT;
 	}
 	chat_panel_cookies = PLSBasic::getBrowserPannelCookieMgr(name);
-	cefWidget = cef->create_widget(nullptr, url, PLSChatHelper::getDispatchJS(index).toStdString(), chat_panel_cookies, {}, false, QColor(30, 30, 31), {}, true);
+	cefWidget = static_cast<PLSQCefWidget *>(plsCef->create_widget(nullptr, url, PLSChatHelper::getDispatchJS(index).toStdString(), chat_panel_cookies, {}, false, QColor(30, 30, 31), {}, true));
 
 	if (PLS_CHAT_HELPER->isLocalHtmlPage(index)) {
 		cefWidget->installEventFilter(this);
@@ -528,6 +559,9 @@ QCefWidget *PLSChatDialog::createANewCefWidget(const string &url, int index)
 	if (index == ChatPlatformIndex::Youtube) {
 		QObject::connect(cefWidget, SIGNAL(urlChanged(const QString &)), this, SLOT(urlDidChanged(const QString &)));
 		QObject::connect(cefWidget, SIGNAL(titleChanged(const QString &)), this, SLOT(titleChanged(const QString &)));
+	}
+	if (index == ChatPlatformIndex::NCB2B || index == ChatPlatformIndex::All) {
+		QObject::connect(cefWidget, SIGNAL(msgRecevied(const QString &, const QString &)), this, SLOT(recvLocalChatWebMsg(const QString &, const QString &)));
 	}
 	return cefWidget;
 }
@@ -538,23 +572,15 @@ void PLSChatDialog::channelRemoveToDeleteCef(int index)
 	if (!pls_object_is_valid(data.widget)) {
 		return;
 	}
-
+	PLS_INFO(s_chatModuleName, "PLSChat Dialog channelRemoveToDeleteCef index:%s", PLS_CHAT_HELPER->getString(index).toUtf8().constData());
 	data.url = PLS_CHAT_HELPER->getChatUrlWithIndex(index, QVariantMap());
-	data.isWebLoaded = false;
-
-#if defined(Q_OS_WIN)
-	auto ce = dynamic_cast<QCefWidget *>(data.widget.data());
-#else
-	auto ce = static_cast<QCefWidget *>(data.widget.data());
-#endif
-	if (ce != nullptr) {
+	auto ce = getCefWidgetByWidget(data);
+	if (ce) {
 		ce->closeBrowser();
 	}
-
+	data.isWebLoaded = false;
 	ui->stackedWidget->removeWidget(data.widget);
-	data.widget = nullptr;
 	pls_delete(data.widget);
-	PLS_INFO(s_chatModuleName, "PLSChat Dialog channelRemoveToDeleteCef index:%s", PLS_CHAT_HELPER->getString(index));
 }
 
 void PLSChatDialog::showEvent(QShowEvent *event)
@@ -568,15 +594,10 @@ void PLSChatDialog::showEvent(QShowEvent *event)
 	emit chatShowOrHide(true);
 
 	if (m_vecChatDatas.size() > m_selectIndex) {
-#if defined(Q_OS_WIN)
-		auto ce = dynamic_cast<QCefWidget *>(m_vecChatDatas[m_selectIndex].widget.data());
-#else
-		auto ce = static_cast<QCefWidget *>(m_vecChatDatas[m_selectIndex].widget.data());
-#endif
-		if (ce == nullptr || ce->isHidden()) {
-			return;
+		auto ce = getCefWidgetByWidget(m_vecChatDatas[m_selectIndex]);
+		if (ce && !ce->isHidden()) {
+			forceResizeDialog();
 		}
-		forceResizeDialog();
 	}
 
 	if (m_bShowToastAgain) {
@@ -617,11 +638,9 @@ void PLSChatDialog::closeEvent(QCloseEvent *event)
 
 void PLSChatDialog::updateRtmpPlaceText()
 {
-	m_rtmpPlaceTextLabel->setText(PLS_CHAT_HELPER->getRtmpPlaceholderString());
-//PRISM/Zhangdewen/20200921/#/add chat source button
-#if 0
-	m_chatSourceButtonNoPlatform->setVisible(PLSCHANNELS_API->getCurrentSelectedChannels().isEmpty());
-#endif
+	if (m_rtmpPlaceTextLabel) {
+		m_rtmpPlaceTextLabel->setText(PLS_CHAT_HELPER->getRtmpPlaceholderString());
+	}
 }
 
 void PLSChatDialog::updateNewUrlByIndex(int index, const QVariantMap &info, bool forceSet)
@@ -629,6 +648,9 @@ void PLSChatDialog::updateNewUrlByIndex(int index, const QVariantMap &info, bool
 	switch (index) {
 	case ChatPlatformIndex::Twitch:
 	case ChatPlatformIndex::Youtube:
+	case ChatPlatformIndex::NCB2B:
+	case ChatPlatformIndex::Chzzk:
+	case ChatPlatformIndex::All:
 		setupNewUrl(index, PLS_CHAT_HELPER->getChatUrlWithIndex(index, info), forceSet);
 		break;
 	default:
@@ -658,6 +680,7 @@ void PLSChatDialog::resizeEvent(QResizeEvent *event)
 	QWidget::resizeEvent(event);
 	updateTabPolicy();
 	adjustToastSize();
+	updateTopAddSourceText();
 }
 
 void PLSChatDialog::adjustToastSize(int dialogWidth)
@@ -721,6 +744,7 @@ void PLSChatDialog::createToasWidget()
 		lay->setContentsMargins(0, 0, 0, 0);
 
 		auto deleteFrame = [frame]() {
+			PLS_INFO(s_chatModuleName, "PLSChat Dialog delete deleteFrame maybe by singleShot");
 			frame->hide();
 			frame->deleteLater();
 		};
@@ -781,7 +805,8 @@ QWidget *PLSChatDialog::createChatSourceButton(QWidget *parent, bool noPlatform)
 	}
 
 	QWidget *widget = pls_new<QWidget>(parent);
-	QWidget *button = pls_new<ChatSourceButton>(tr("Chat.SourceButton.OnePlatform"), widget, [this]() { chatSourceButtonClicked(); });
+	m_chatSourceBtn = pls_new<ChatSourceButton>(tr("Chat.SourceButton.OnePlatform"), widget, [this]() { chatSourceButtonClicked(); });
+	QWidget *button = m_chatSourceBtn;
 	QHBoxLayout *layout = pls_new<QHBoxLayout>(widget);
 	layout->setContentsMargins(0, 0, 0, 0);
 	layout->setSpacing(0);
@@ -812,19 +837,23 @@ int PLSChatDialog::getShownBtnCount()
 void PLSChatDialog::updateTabPolicy()
 {
 	int shownCount = getShownBtnCount();
-	int errorShowncount = 6;
-	int onlyOnePixMinWidth = 350;
-
-	int space = 10;
-	if (shownCount >= errorShowncount && this->frameGeometry().size().width() < onlyOnePixMinWidth) {
-		space = 1;
-	}
-	ui->scrollAreaWidgetContents->layout()->setSpacing(space);
-
 	auto mar = ui->horizontalLayoutTitleWidget->contentsMargins();
 	int left = shownCount > 1 ? 5 : 10;
 	mar.setLeft(left);
 	ui->horizontalLayoutTitleWidget->setContentsMargins(mar);
+}
+
+void PLSChatDialog::updateTopAddSourceText()
+{
+	pls_async_call_mt(this, [this]() {
+		pls_check_app_exiting();
+		if (m_chatSourceBtn) {
+			ChatSourceButton *cBtn = dynamic_cast<ChatSourceButton *>(m_chatSourceBtn.data());
+			if (cBtn) {
+				cBtn->updateTextWidth(qMax(m_rightHorizontalSpacer->geometry().width() - 10, 0));
+			}
+		}
+	});
 }
 
 void PLSChatDialog::switchStackWidget(int index)
@@ -849,6 +878,7 @@ void PLSChatDialog::switchStackWidget(int index)
 
 void PLSChatDialog::facebookPrivateChatChanged(bool oldPrivate, bool newPrivate)
 {
+	pls_check_app_exiting();
 	if (oldPrivate == false && newPrivate == true) {
 		createToasWidget();
 		m_pLabelToast->setText(tr("facebook.living.chat.Private"));
@@ -863,12 +893,15 @@ void PLSChatDialog::facebookPrivateChatChanged(bool oldPrivate, bool newPrivate)
 //PRISM/Zhangdewen/20200921/#/add chat source button
 void PLSChatDialog::chatSourceButtonClicked() const
 {
-	PLSBasic::Get()->AddSource(PRISM_CHAT_SOURCE_ID);
+	PLSBasic::Get()->AddSource(PRISM_CHATV2_SOURCE_ID);
 }
 
 void PLSChatDialog::fontZoomButtonClicked()
 {
 	auto showDialog = [this]() {
+		PLS_INFO(s_chatModuleName, "PLSChat Dialog fontZoomButtonClicked singleShot");
+		if (!m_fontChangeBtn)
+			return;
 		auto *dialog = pls_new<PLSChatFontZoomFrame>(m_fontChangeBtn, ui->stackedWidget);
 		dialog->setAttribute(Qt::WA_DeleteOnClose, true);
 		dialog->setWindowFlags(Qt::Popup | Qt::NoDropShadowWindowHint);
@@ -880,16 +913,17 @@ void PLSChatDialog::fontZoomButtonClicked()
 
 void PLSChatDialog::updateFontBtnStatus()
 {
-
-	bool isT_Y = ChatPlatformIndex::Twitch == m_selectIndex || ChatPlatformIndex::Youtube == m_selectIndex;
-	if (getShownBtnCount() == 1 && isT_Y) {
+	if (!m_fontChangeBtn)
+		return;
+	bool isRemote = PLS_CHAT_HELPER->isRemoteHtmlPage(m_selectIndex);
+	if (getShownBtnCount() == 1 && isRemote) {
 		m_fontChangeBtn->setHidden(true);
 		emit fontBtnDisabled();
 		return;
 	}
 	m_fontChangeBtn->setHidden(false);
 
-	if (PLS_CHAT_HELPER->isLocalHtmlPage(m_selectIndex) && !isT_Y) {
+	if (PLS_CHAT_HELPER->isLocalHtmlPage(m_selectIndex) && !isRemote) {
 		m_fontChangeBtn->setEnabled(true);
 		return;
 	}
@@ -917,4 +951,118 @@ void PLSChatDialog::titleChanged(const QString &title)
 			updateYoutubeUrlIfNeeded(true);
 		});
 	}
+}
+void PLSChatDialog::youtubePrivateChange()
+{
+	pls_check_app_exiting();
+	m_bRefeshYoutubeChat = true;
+	PLS_INFO(MODULE_PlatformService, "youtube signal privateChangedToOther emited");
+	updateYoutubeUrlIfNeeded(true);
+}
+
+void PLSChatDialog::recvLocalChatWebMsg(const QString &type, const QString &msg)
+{
+	if (type == "open_browser") {
+		QDesktopServices::openUrl(QUrl(msg));
+		return;
+	}
+	if (type != "menu_show") {
+		return;
+	}
+
+	m_chatActionSelect = false;
+
+	QPointer<PLSQCefWidget> sendW = static_cast<PLSQCefWidget *>(sender());
+	if (m_maskWidget && m_maskWidget->parentWidget() != sendW) {
+		m_maskWidget->setParent(sendW);
+	}
+	if (!m_maskWidget) {
+		m_maskWidget = new QFrame(sendW, Qt::Tool | Qt::FramelessWindowHint);
+		m_maskWidget->setAttribute(Qt::WA_NativeWindow, true);
+		m_maskWidget->setWindowOpacity(0.1);
+	}
+	m_maskWidget->setGeometry(QRect(sendW->mapToGlobal(QPoint{0, 0}), sendW->size()));
+	m_maskWidget->setFixedSize(sendW->size());
+	m_maskWidget->setVisible(true);
+
+	QMenu chatWebMenu;
+	PLSHideWatcher watcher(&chatWebMenu);
+	QObject::connect(&watcher, &PLSHideWatcher::signalHide, &chatWebMenu, [sendW, &chatWebMenu, this]() {
+		if (m_maskWidget) {
+			m_maskWidget->setVisible(false);
+		}
+
+		pls_async_call_mt([sendW, this]() {
+			PLS_INFO(UPDATE_MODULE, "PLSShowWatcher notify webMenu hide event");
+			if (!m_chatActionSelect && sendW) {
+				sendW->sendMsg(L"menu_handle", getSendWebData({{"id", ""}}));
+			}
+			m_chatActionSelect = false;
+		});
+	});
+	QObject::connect(PLSUiApp::instance(), &PLSUiApp::appStateChanged, &chatWebMenu, [cwm = QPointer<QMenu>(&chatWebMenu), this](bool actived) {
+		PLS_INFO(UPDATE_MODULE, "PLSChatDialog::recvLocalChatWebMsg state=%s", actived ? "active" : "inactive");
+		if (m_maskWidget) {
+			m_maskWidget->setVisible(false);
+		}
+		if (cwm) {
+			cwm->close();
+		}
+	});
+
+	auto dataArray = QJsonDocument::fromJson(msg.toUtf8()).array();
+
+	for (auto data : dataArray) {
+		auto jsobj = data.toObject();
+		auto action = chatWebMenu.addAction(jsobj.value("label").toString(), [this, sendW, jsobj]() {
+			m_chatActionSelect = true;
+			if (sendW) {
+				sendW->activateWindow();
+				sendW->sendMsg(L"menu_handle", getSendWebData(jsobj));
+			}
+		});
+		action->setEnabled(jsobj.value("enable").toBool());
+	}
+
+	chatWebMenu.exec(QCursor::pos());
+}
+
+QCefWidget *PLSChatDialog::getCefWidgetByWidget(const ChatDatas &data)
+{
+#if defined(Q_OS_WIN)
+	auto ce = dynamic_cast<QCefWidget *>(data.widget.data());
+	return ce;
+#else
+	if (!data.isWebLoaded) {
+		return nullptr;
+	}
+	auto ce = static_cast<QCefWidget *>(data.widget.data());
+	return ce;
+#endif
+}
+
+void PLSChatDialog::updateTabBtnCss()
+{
+	for (int i = 0; i <= ChatPlatformIndex::UnDefine; i++) {
+
+		auto smallName = PLS_CHAT_HELPER->getString(i, true);
+		QString objectName = QString(smallName).append("btn");
+		auto tabButton = m_vecChatDatas[i].button;
+		if (!tabButton) {
+			continue;
+		}
+		if (i != ChatPlatformIndex::RTMP && i != ChatPlatformIndex::UnDefine) {
+			tabButton->setObjectName(objectName);
+			tabButton->setStyleSheet(PLS_CHAT_HELPER->getTabButtonCss(objectName, smallName, PLS_CHAT_HELPER->getString(i)));
+		}
+	}
+}
+
+std::wstring PLSChatDialog::getSendWebData(const QJsonObject &data)
+{
+	QJsonObject sendParam;
+	sendParam.insert("data", data);
+	QJsonDocument doc;
+	doc.setObject(sendParam);
+	return QString::fromUtf8(doc.toJson()).toStdWString();
 }

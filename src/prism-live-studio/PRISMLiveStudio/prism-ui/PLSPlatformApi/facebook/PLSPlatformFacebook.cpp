@@ -8,7 +8,6 @@
 #include "prism/PLSPlatformPrism.h"
 #include "log/log.h"
 
-
 constexpr auto facebookMoudule = "PLSLiveInfoFacebook";
 
 const QString FacebookPrivacyItemType = "FacebookPrivacyItemType";
@@ -236,62 +235,53 @@ void PLSPlatformFacebook::onAlLiveStarted(bool value)
 
 void PLSPlatformFacebook::onLiveEnded()
 {
-	auto callBack = [this](PLSAPIFacebookType) { liveEndedCallback(); };
+	auto callBack = [this](const PLSErrorHandler::RetData &) { liveEndedCallback(); };
 	PLSFaceBookRquest->stopFacebookLiving(m_prepareInfo.liveId, callBack);
 }
 
 void PLSPlatformFacebook::getLongLivedUserAccessToken(const MyRequestTypeFunction &onFinished)
 {
-	auto callBack = [onFinished, this](PLSAPIFacebookType type, const QString &accessToken) {
-		if (type == PLSAPIFacebookType::PLSFacebookSuccess) {
+	auto callBack = [onFinished, this](const PLSErrorHandler::RetData &retData, const QString &accessToken) {
+		if (retData.prismCode == PLSErrorHandler::SUCCESS) {
 			insertSrcInfo(ChannelData::g_channelToken, accessToken);
 			getUserInfo(onFinished);
 			return;
 		}
-		if (type == PLSAPIFacebookType::PLSFacebookInvalidAccessToken) {
-			insertSrcInfo(ChannelData::g_channelSreLoginFailed , QStringLiteral("facebook get long access token api request invalid access token"));
-			insertSrcInfo(ChannelData::g_channelStatus, ChannelData::ChannelStatus::Expired);
-			onFinished(type);
-			return;
+
+		auto chStatus = ChannelData::ChannelStatus::Error;
+		if (PLSErrorHandler::ErrorType::TokenExpired == retData.errorType) {
+			chStatus = ChannelData::ChannelStatus::Expired;
 		}
-		insertSrcInfo(ChannelData::g_channelStatus, ChannelData::ChannelStatus::Error);
-		if (type == PLSAPIFacebookType::PLSFacebookNetworkError) {
-			insertSrcInfo(ChannelData::g_channelSreLoginFailed, QStringLiteral("facebook get long access token api network error failed"));
-			insertSrcInfo(ChannelData::g_errorType, ChannelData::NetWorkErrorType::NetWorkNoStable);
-			onFinished(type);
-			return;
-		}
-		insertSrcInfo(ChannelData::g_channelSreLoginFailed, QStringLiteral("facebook get long access token api unkown reason failed"));
-		insertSrcInfo(ChannelData::g_errorType, ChannelData::NetWorkErrorType::UnknownError);
-		onFinished(type);
+
+		m_srcInfo[ChannelData::g_channelSreLoginFailed] = QString("Get Channel List Failed, result:%1").arg((int)retData.prismCode);
+		m_srcInfo[ChannelData::g_channelStatus] = chStatus;
+		m_srcInfo[ChannelData::g_errorRetdata] = QVariant::fromValue(retData);
+		m_srcInfo[ChannelData::g_errorString] = retData.alertMsg;
+		onFinished(retData);
 	};
 	PLSFaceBookRquest->getLongLiveUserAccessToken(callBack);
 }
 
 void PLSPlatformFacebook::getUserInfo(const MyRequestTypeFunction &onFinished)
 {
-	auto callBack = [onFinished, this](PLSAPIFacebookType type, const QString &username, const QString &imagePath, const QString &userId) {
-		if (type == PLSAPIFacebookType::PLSFacebookSuccess) {
+	auto callBack = [onFinished, this](const PLSErrorHandler::RetData &retData, const QString &username, const QString &imagePath, const QString &userId) {
+		pls_check_app_exiting();
+		if (retData.prismCode == PLSErrorHandler::SUCCESS) {
 			getUserInfoSuccess(userId, username, imagePath);
-			onFinished(type);
+			onFinished(retData);
 			return;
 		}
-		if (type == PLSAPIFacebookType::PLSFacebookInvalidAccessToken) {
-			insertSrcInfo(ChannelData::g_channelStatus, ChannelData::ChannelStatus::Expired);
-			insertSrcInfo(ChannelData::g_channelSreLoginFailed, QStringLiteral("facebook get user info api request token expired failed"));
-			onFinished(type);
-			return;
+
+		auto chStatus = ChannelData::ChannelStatus::Error;
+		if (PLSErrorHandler::ErrorType::TokenExpired == retData.errorType) {
+			chStatus = ChannelData::ChannelStatus::Expired;
 		}
-		insertSrcInfo(ChannelData::g_channelStatus, ChannelData::ChannelStatus::Error);
-		if (type == PLSAPIFacebookType::PLSFacebookNetworkError) {
-			insertSrcInfo(ChannelData::g_channelSreLoginFailed, QStringLiteral("facebook get user info api request network error failed"));
-			insertSrcInfo(ChannelData::g_errorType, ChannelData::NetWorkErrorType::NetWorkNoStable);
-			onFinished(type);
-			return;
-		}
-		insertSrcInfo(ChannelData::g_channelSreLoginFailed, QStringLiteral("facebook get user info api request unkown error failed"));
-		insertSrcInfo(ChannelData::g_errorType, ChannelData::NetWorkErrorType::UnknownError);
-		onFinished(type);
+
+		m_srcInfo[ChannelData::g_channelSreLoginFailed] = QString("Get Channel List Failed, result:%1").arg((int)retData.prismCode);
+		m_srcInfo[ChannelData::g_channelStatus] = chStatus;
+		m_srcInfo[ChannelData::g_errorRetdata] = QVariant::fromValue(retData);
+		m_srcInfo[ChannelData::g_errorString] = retData.alertMsg;
+		onFinished(retData);
 	};
 	PLSFaceBookRquest->getUserInfo(callBack);
 }
@@ -318,33 +308,33 @@ void PLSPlatformFacebook::getUserInfoSuccess(const QString &userId, const QStrin
 
 void PLSPlatformFacebook::getMyGroupListRequestAndCheckPermission(const MyRequestTypeFunction &onFinished, QWidget *parent)
 {
-	auto callback = [onFinished, this](PLSAPIFacebookType type, const QList<FacebookGroupInfo> &list) {
-		if (type == PLSAPIFacebookType::PLSFacebookSuccess) {
+	auto callback = [onFinished, this](const PLSErrorHandler::RetData &retData, const QList<FacebookGroupInfo> &list) {
+		if (retData.prismCode == PLSErrorHandler::SUCCESS) {
 			m_groupList = list;
 		}
-		onFinished(type);
+		onFinished(retData);
 	};
 	PLSFaceBookRquest->getMyGroupListRequestAndCheckPermission(callback, parent);
 }
 
 void PLSPlatformFacebook::getMyPageListRequestAndCheckPermission(const MyRequestTypeFunction &onFinished, QWidget *parent)
 {
-	auto callback = [onFinished, this](PLSAPIFacebookType type, const QList<FacebookPageInfo> &list) {
-		if (type == PLSAPIFacebookType::PLSFacebookSuccess) {
+	auto callback = [onFinished, this](const PLSErrorHandler::RetData &retData, const QList<FacebookPageInfo> &list) {
+		if (retData.prismCode == PLSErrorHandler::SUCCESS) {
 			m_pageList = list;
 		}
-		onFinished(type);
+		onFinished(retData);
 	};
 	PLSFaceBookRquest->getMyPageListRequestAndCheckPermission(callback, parent);
 }
 
 void PLSPlatformFacebook::getGameTagListByKeyword(const MyRequestTypeFunction &onFinished, const QString &keyword)
 {
-	auto callback = [onFinished, this](PLSAPIFacebookType type, const QList<FacebookGameInfo> &list) {
-		if (type == PLSAPIFacebookType::PLSFacebookSuccess) {
+	auto callback = [onFinished, this](const PLSErrorHandler::RetData &retData, const QList<FacebookGameInfo> &list) {
+		if (retData.prismCode == PLSErrorHandler::SUCCESS) {
 			m_gameList = list;
 		}
-		onFinished(type);
+		onFinished(retData);
 	};
 	PLSFaceBookRquest->searchGameTagListByKeyword(callback, keyword);
 }
@@ -372,41 +362,22 @@ void PLSPlatformFacebook::startLiving(const MyRequestTypeFunction &onFinished)
 		apiType = PLSAPIFacebook::PLSAPIStartPageLiving;
 	}
 
-	auto livingFinished = [this, onFinished, shareObjectName](PLSAPIFacebookType type, const QString &streamURL, const QString &liveId, const QString &videoId, const QString &shareLink) {
-		if (type != PLSAPIFacebookType::PLSFacebookSuccess) {
-			PLS_LOGEX(PLS_LOG_ERROR, facebookMoudule, {{"platformName", "facebook"}, {"startLiveStatus", "Failed"}, {"startLiveFailed", "facebook create live api failed"}},
-				  "facebook start live failed");
-			onFinished(type);
+	auto livingFinished = [this, onFinished, shareObjectName](const PLSErrorHandler::RetData &retData, const QString &streamURL, const QString &liveId, const QString &videoId,
+								  const QString &shareLink) {
+		if (retData.prismCode != PLSErrorHandler::SUCCESS) {
+			onFinished(retData);
 			return;
 		}
-		auto timeLinePrivacyFunction = [onFinished](PLSAPIFacebookType type) {
-			if (type != PLSAPIFacebookType::PLSFacebookSuccess) {
-				PLS_LOGEX(PLS_LOG_ERROR, facebookMoudule, {{"platformName", "facebook"}, {"startLiveStatus", "Failed"}, {"startLiveFailed", "facebook get timeline privacy api request failed"}},
-					  "facebook start live failed");
-			} else {
-				PLS_LOGEX(PLS_LOG_ERROR, facebookMoudule, {{"platformName", "facebook"}, {"startLiveStatus", "Success"}}, "facebook start live success");
-			}
-			onFinished(type);
-		};
-		auto itemInfoFunction = [onFinished](PLSAPIFacebookType type) {
-			if (type != PLSAPIFacebookType::PLSFacebookSuccess) {
-				PLS_LOGEX(PLS_LOG_ERROR, facebookMoudule, {{"platformName", "facebook"}, {"startLiveStatus", "Failed"}, {"startLiveFailed", "facebook get group/page/timeline info api request failed"}},
-					  "facebook start live failed");
-			} else {
-				PLS_LOGEX(PLS_LOG_ERROR, facebookMoudule, {{"platformName", "facebook"}, {"startLiveStatus", "Success"}}, "facebook start live success");
-			}
-			onFinished(type);
-		};
 		m_prepareInfo.streamURL = streamURL;
 		m_prepareInfo.liveId = liveId;
 		m_prepareInfo.videoId = videoId;
 		m_prepareInfo.shareLink = shareLink;
 		setStreamUrlAndStreamKey();
 		if (shareObjectName == TimelineObjectFlags) {
-			getTimelinePrivacyRequest(timeLinePrivacyFunction);
+			getTimelinePrivacyRequest(onFinished);
 			return;
 		}
-		requestItemInfoRequest(itemInfoFunction);
+		requestItemInfoRequest(onFinished);
 	};
 	PLSFaceBookRquest->startLiving(apiType, itemId, getTimelinePrivacy(), accessToken, livingFinished);
 }
@@ -417,15 +388,18 @@ void PLSPlatformFacebook::updateLiving(const MyRequestTypeFunction &onFinished)
 	QString description = m_prepareInfo.description;
 	QString gameId = m_prepareInfo.gameId;
 	m_oldTimelinePrivacy = getTimelinePrivacy();
-	auto updateFinished = [onFinished, this](PLSAPIFacebookType type) {
-		if (type != PLSAPIFacebookType::PLSFacebookSuccess) {
-			onFinished(type);
+	auto updateFinished = [onFinished, this](const PLSErrorHandler::RetData &retData) {
+		if (retData.prismCode != PLSErrorHandler::SUCCESS) {
+			onFinished(retData);
 			return;
 		}
-		if (QString shareObjectName = m_prepareInfo.firstObjectName; shareObjectName == TimelineObjectFlags) {
+
+		QString shareObjectName = m_prepareInfo.firstObjectName;
+		if (shareObjectName == TimelineObjectFlags) {
 			getTimelinePrivacyRequest(onFinished);
 			return;
 		}
+
 		requestItemInfoRequest(onFinished);
 	};
 	PLSFaceBookRquest->updateFacebookLiving(m_prepareInfo.liveId, getTimelinePrivacy(), updateFinished);
@@ -439,17 +413,19 @@ void PLSPlatformFacebook::requestItemInfoRequest(const MyRequestTypeFunction &on
 	if (shareObjectName == TimelineObjectFlags) {
 		itemId = FacebookTimelineItemId;
 	}
-	auto itemInfoFinished = [onFinished, shareObjectName, this](PLSAPIFacebookType type, QString nickname, QString profilePath) {
-		this->getFacebookItemUserInfoFinished(type, nickname, profilePath, shareObjectName);
-		onFinished(type);
+	auto itemInfoFinished = [onFinished, shareObjectName, this](const PLSErrorHandler::RetData &retData, QString nickname, QString profilePath) {
+		if (retData.prismCode == PLSErrorHandler::SUCCESS) {
+			getFacebookItemUserInfoFinished(retData, nickname, profilePath, shareObjectName);
+		}
+		onFinished(retData);
 	};
 	PLSFaceBookRquest->getFacebookItemUserInfo(itemId, itemInfoFinished);
 }
 
-void PLSPlatformFacebook::getFacebookItemUserInfoFinished(PLSAPIFacebookType type, const QString &nickname, const QString &profilePath, const QString &shareObjectName)
+void PLSPlatformFacebook::getFacebookItemUserInfoFinished(const PLSErrorHandler::RetData &retData, const QString &nickname, const QString &profilePath, const QString &shareObjectName)
 {
 	QVariantMap map;
-	if (type == PLSAPIFacebookType::PLSFacebookSuccess) {
+	if (retData.prismCode == PLSErrorHandler::SUCCESS) {
 		//update dashboard
 		map.insert(ChannelData::g_nickName, nickname);
 		map.insert(ChannelData::g_displayLine1, nickname);
@@ -534,12 +510,12 @@ void PLSPlatformFacebook::setStreamUrlAndStreamKey()
 
 void PLSPlatformFacebook::getLivingVideoTitleDescRequest(const MyRequestTypeFunction &onFinished)
 {
-	auto callBack = [onFinished, this](PLSAPIFacebookType type, const QString &title, const QString &description) {
-		if (type == PLSAPIFacebookType::PLSFacebookSuccess) {
+	auto callBack = [onFinished, this](const PLSErrorHandler::RetData &retData, const QString &title, const QString &description) {
+		if (retData.prismCode == PLSErrorHandler::SUCCESS) {
 			m_prepareInfo.title = title;
 			m_prepareInfo.description = description;
 		}
-		onFinished(type);
+		onFinished(retData);
 	};
 	PLSFaceBookRquest->getLiveVideoTitleDesRequest(m_prepareInfo.liveId, callBack);
 }
@@ -616,32 +592,33 @@ bool PLSPlatformFacebook::isPrivateChat() const
 
 void PLSPlatformFacebook::getTimelinePrivacyRequest(const MyRequestTypeFunction &onFinished)
 {
-	auto privacyFinished = [onFinished, this](PLSAPIFacebookType type, QString privacyId) {
-		if (QString shareObjectName = m_prepareInfo.firstObjectName; shareObjectName != TimelineObjectFlags) {
-			onFinished(PLSAPIFacebookType::PLSFacebookFailed);
+	auto privacyFinished = [onFinished, this](const PLSErrorHandler::RetData &retData, QString privacyId) {
+		QString shareObjectName = m_prepareInfo.firstObjectName;
+		if (shareObjectName != TimelineObjectFlags) {
+			onFinished(PLSErrorHandler::getAlertStringByPrismCode(PLSErrorHandler::COMMON_DEFAULT_UPDATELIVEINFOFAILED_NOSERVICE, FACEBOOK, QString()));
 			return;
 		}
-		if (type == PLSAPIFacebookType::PLSFacebookSuccess) {
+		if (retData.prismCode == PLSErrorHandler::SUCCESS) {
 			m_prepareInfo.secondObjectId = privacyId;
 			m_prepareInfo.secondObjectName = getItemName(privacyId, FacebookPrivacyItemType);
 			currentPrivacyInconsistentDisplay(privacyId);
 			requestItemInfoRequest(onFinished);
 			return;
 		}
-		onFinished(type);
+		onFinished(retData);
 	};
 	PLSFaceBookRquest->getTimelinePrivacyRequest(m_prepareInfo.videoId, privacyFinished);
 }
 
 void PLSPlatformFacebook::getLivingTimelinePrivacyRequest(const TimelinePrivacyFunction &onFinished)
 {
-	auto privacyFinished = [onFinished, this](PLSAPIFacebookType type, QString privacyId) {
-		if (type == PLSAPIFacebookType::PLSFacebookSuccess) {
+	auto privacyFinished = [onFinished, this](const PLSErrorHandler::RetData &retData, QString privacyId) {
+		if (retData.prismCode != PLSErrorHandler::SUCCESS) {
 			m_prepareInfo.secondObjectId = privacyId;
 			m_prepareInfo.secondObjectName = getItemName(privacyId, FacebookPrivacyItemType);
 			currentPrivacyInconsistentDisplay(privacyId);
 		}
-		onFinished(type, privacyId);
+		onFinished(retData, privacyId);
 	};
 	PLSFaceBookRquest->getTimelinePrivacyRequest(m_prepareInfo.videoId, privacyFinished);
 }

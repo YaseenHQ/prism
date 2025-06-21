@@ -3,15 +3,19 @@
 #include <obs.hpp>
 #include <QWidget>
 #include <QPaintEvent>
-#include <QSharedPointer>
 #include <QTimer>
 #include <QMutex>
 #include <QList>
 #include <QMenu>
+#include <QAccessibleWidget>
+#include "absolute-slider.hpp"
+#include <QTimer>
 #include "PLSPushButton.h"
+#include "frontend-api.h"
 
 class QPushButton;
 class VolumeMeterTimer;
+class VolumeSlider;
 
 class VolumeMeter : public QWidget {
 	Q_OBJECT
@@ -95,13 +99,10 @@ class VolumeMeter : public QWidget {
 
 	friend class VolControl;
 
-private slots:
-	void ClipEnding();
-
 private:
 	obs_volmeter_t *obs_volmeter;
-	static QWeakPointer<VolumeMeterTimer> updateTimer;
-	QSharedPointer<VolumeMeterTimer> updateTimerRef;
+	static std::weak_ptr<VolumeMeterTimer> updateTimer;
+	std::shared_ptr<VolumeMeterTimer> updateTimerRef;
 
 	inline void resetLevels();
 	inline bool detectIdle(uint64_t ts);
@@ -275,30 +276,32 @@ protected:
 };
 
 class QLabel;
-class QSlider;
+class VolumeSlider;
 class MuteCheckBox;
+class OBSSourceLabel;
 
-class VolControl : public QWidget {
+class VolControl : public QFrame {
 	Q_OBJECT
 
 private:
 	OBSSource source;
+	std::vector<OBSSignal> sigs;
 	QLabel *nameLabel;
 	QLabel *volLabel;
 	VolumeMeter *volMeter;
-	QSlider *slider;
+	VolumeSlider *slider;
 	MuteCheckBox *mute;
 	QPushButton *config = nullptr;
-	PLSSwitchButton *monitor = nullptr;
-	OBSSignal addSignal;
-	OBSSignal removeSignal;
 	float levelTotal;
 	float levelCount;
-	obs_fader_t *obs_fader;
-	obs_volmeter_t *obs_volmeter;
+	OBSFader obs_fader;
+	OBSVolMeter obs_volmeter;
 	bool vertical;
 	QMenu *contextMenu;
+	PLSSwitchButton *monitor = nullptr;
 	QString currentDisplayName;
+	bool clicked = false;
+	QTimer timerDelay;
 
 	static void OBSVolumeChanged(void *param, float db);
 	static void OBSVolumeLevel(void *data,
@@ -306,12 +309,14 @@ private:
 				   const float peak[MAX_AUDIO_CHANNELS],
 				   const float inputPeak[MAX_AUDIO_CHANNELS]);
 	static void OBSVolumeMuted(void *data, calldata_t *calldata);
-
-	static void MonitorChange(pls_frontend_event event,
-				  const QVariantList &params, void *context);
+	static void OBSMixersOrMonitoringChanged(void *data, calldata_t *);
 
 	void EmitConfigClicked();
 	void MonitorStateChangeFromAdv(Qt::CheckState state);
+	static void MonitorChange(pls_frontend_event event,
+				  const QVariantList &params, void *context);
+
+	void LogVolumeChanged();
 
 public slots:
 	void SetMuted(bool checked);
@@ -319,6 +324,7 @@ public slots:
 private slots:
 	void VolumeChanged();
 	void VolumeMuted(bool muted);
+	void MixersOrMonitoringChanged();
 
 	void SliderChanged(int vol);
 	void updateText();
@@ -335,9 +341,6 @@ public:
 
 	inline obs_source_t *GetSource() const { return source; }
 
-	QString GetName() const;
-	void SetName(const QString &newName);
-
 	void SetMeterDecayRate(qreal q);
 	void setPeakMeterType(enum obs_peak_meter_type peakMeterType);
 
@@ -346,6 +349,65 @@ public:
 
 	void refreshColors();
 
+	void setClickState(bool clicked);
+	void updateMouseState(bool hover);
+
+	void displayBorder(bool display, const char *direction = NULL)
+	{
+		if (display) {
+			if (direction)
+				pls_flush_style(this, "borderType", direction);
+
+		} else {
+			pls_flush_style(this, "borderType", "none");
+		}
+	}
+
+	QString GetName() const;
+	void SetName(const QString &newName);
+
 protected:
 	bool eventFilter(QObject *watched, QEvent *e) override;
+};
+
+class VolumeSlider : public AbsoluteSlider {
+	Q_OBJECT
+
+public:
+	obs_fader_t *fad;
+
+	VolumeSlider(obs_fader_t *fader, QWidget *parent = nullptr);
+	VolumeSlider(obs_fader_t *fader, Qt::Orientation orientation,
+		     QWidget *parent = nullptr);
+
+	bool getDisplayTicks() const;
+	void setDisplayTicks(bool display);
+
+private:
+	bool displayTicks = false;
+	QColor tickColor;
+
+protected:
+	virtual void paintEvent(QPaintEvent *event) override;
+};
+
+class VolumeAccessibleInterface : public QAccessibleWidget {
+
+public:
+	VolumeAccessibleInterface(QWidget *w);
+
+	QVariant currentValue() const;
+	void setCurrentValue(const QVariant &value);
+
+	QVariant maximumValue() const;
+	QVariant minimumValue() const;
+
+	QVariant minimumStepSize() const;
+
+private:
+	VolumeSlider *slider() const;
+
+protected:
+	virtual QAccessible::Role role() const override;
+	virtual QString text(QAccessible::Text t) const override;
 };

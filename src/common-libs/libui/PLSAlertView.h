@@ -257,6 +257,8 @@ public:
 	static Result questionWithCountdownView(QWidget *parent, const QString &title, const QString &message, const QString &checkbox, const QMap<Button, QString> &buttons,
 						Button defaultButton = Button::NoButton, const quint64 &timeout = 10 * 1000, int buttonBoxWidth = 170);
 
+	static Button dualOutputApplyResolutionWarn(QWidget *parent, const QString &title, const QString &message, const QMap<Button, QString> &buttons, const QString &hRadioMsg,
+						    const QString &vRadioMsg, bool &selectVRadio, Button defaultButton = Button::NoButton);
 	bool isChecked() const;
 
 	Qt::TextFormat getTextFormat() const;
@@ -274,6 +276,7 @@ private slots:
 
 protected:
 	void showEvent(QShowEvent *event) override;
+	void nativeResizeEvent(const QSize &size, const QSize &nativeSize) override;
 
 private:
 	Ui::PLSAlertView *ui = nullptr;
@@ -282,6 +285,8 @@ private:
 	QTimer *m_delayAutoClickTimer = nullptr;
 	int m_btnCount = 0;
 	QMap<QString, QVariant> m_otherConfig{};
+	bool m_needCorrectedHeight = false;
+	bool m_needUpdatePosWhenCorrectedHeight = false;
 };
 
 #endif // PLSALERTVIEW_H

@@ -25,8 +25,37 @@
 #include "navertv/PLSPlatformNaverTV.h"
 #include "PLSPlatformAfreecaTV.h"
 #include "naver-shopping-live/PLSPlatformNaverShoppingLIVE.h"
+#include "chzzk/PLSPlatformChzzk.h"
+#include "ncb2b/PLSPlatformNCB2B.h"
 
-enum class EndLiveType { MQTT_END_LIVE, CLICK_FINISH_BUTTON, OBS_END_LIVE, OTHER_TYPE };
+enum class LiveAbortStage {
+	LiveStartRequestFailed,
+	LiveDirectStartRequestFailed,
+	DuplicatedStreamingActive,
+	DisableOutputsRef,
+	SetupStreamingFailed,
+	StartStreamingFailed,
+	ObsForceStoppingStream,
+	LiveFinishedByPlatform,
+	RequestBroadcastEnd,
+	SimulcastUnstableEndLive
+};
+enum class LiveAbortDetailStage {
+	LiveStartRequestNotJsonObject,
+	LiveStartRequestFailed,
+	LiveStartRequestTimeout,
+	LiveStartRequestFailedWithJson,
+	DuplicatedStreamingActive,
+	DisableOutputsRef,
+	SetupStreamingFailed,
+	StartStreamingFailed,
+	ObsForceStoppingStream,
+	LiveFinishedByPlatform,
+	RequestBroadcastEnd,
+	SimulcastUnstableEndLive
+};
+
+enum class EndLiveType { NONE_TYPE, MQTT_END_LIVE, CLICK_FINISH_BUTTON, OBS_END_LIVE, OTHER_TYPE };
 enum class LiveStatus { Normal, PrepareLive, ToStart, LiveStarted, Living, PrepareFinish, ToStop, LiveStoped, LiveEnded };
 enum class PLSEndPageType;
 #define BOOL2STR(x) (x) ? "true" : "false"
@@ -54,6 +83,12 @@ const QString ANALOG_BGM_ID_KEY = "musicId";
 const QString ANALOG_BGM_DURATION_KEY = "duration";
 const QString ANALOG_VIRTUAL_CAM_PROCESS_KEY = "targetProcessName";
 
+//live abort info key
+extern const QString LIVE_ABORT_STATUS_CODE_KEY;
+extern const QString LIVE_ABORT_ERROR_CODE_KEY;
+extern const QString LIVE_ABORT_REQUEST_URL_KEY;
+extern const QString LIVE_ABORT_JSON_TEXT_KEY;
+
 class PLSPlatformApi : public QObject {
 	Q_OBJECT
 
@@ -64,8 +99,11 @@ public:
 	bool initialize();
 
 	//Save the push address and push key of the platform, this method is called before live broadcast
-	void saveStreamSettings(std::string platform, std::string server, const std::string_view &key) const;
-	void saveStreamSettings(const char *serviceId, OBSData settings) const;
+	void saveStreamSettings(std::string platform, std::string server, const std::string_view &key, bool bVerticalOutput, const QString &rtmpUserId = QString(),
+				const QString &rtmpUserPassword = QString());
+	void saveStreamSettings(const char *serviceId, OBSData settings, bool bVerticalOutput) const;
+
+	void setPlatformUrl();
 
 	//Used for title of live information
 	int getTotalSteps() const { return m_iTotalSteps; };
@@ -129,7 +167,7 @@ public:
 	}
 
 	//Processing logic when receiving the RequestBroadcastEnd message of MQTT
-	void doMqttRequestBroadcastEnd(PLSPlatformBase *base);
+	void doMqttRequestBroadcastEnd(PLSPlatformBase *base, DualOutputType outputType, const QJsonObject &jsonObject = QJsonObject());
 
 	//Use which to get whether there is a corresponding platform initialization, if not, use which to initialize the platform object
 	PLSPlatformBase *getPlatformById(const QString &channelUUID, const QVariantMap &info);
@@ -160,7 +198,8 @@ public:
 	//Get all platform pointer objects logged in
 	const std::list<PLSPlatformBase *> &getAllPlatforms() const { return platformList; };
 	std::list<PLSPlatformBase *> getActivePlatforms() const;
-	std::list<PLSPlatformBase *> getActiveValidPlatforms() const;
+	std::list<PLSPlatformBase *> getHorizontalPlatforms() const;
+	std::list<PLSPlatformBase *> getVerticalPlatforms() const;
 
 	//Whether the current platform type is active
 	bool isPlatformActived(PLSServiceType) const;
@@ -175,6 +214,7 @@ public:
 	//Get the Twitch platform pointer, the pointer is empty when the channel is not logged in
 	PLSPlatformTwitch *getPlatformTwitch();
 	PLSPlatformTwitch *getPlatformTwitchActive();
+	bool isTwitchWHIP();
 
 	//Get the Band platform pointer, the pointer is empty when the channel is not logged in
 	PLSPlatformBand *getPlatformBand();
@@ -199,6 +239,14 @@ public:
 	//Get the NaverShopping platform pointer, the pointer is empty when the channel is not logged in
 	PLSPlatformNaverShoppingLIVE *getPlatformNaverShoppingLIVE();
 	PLSPlatformNaverShoppingLIVE *getPlatformNaverShoppingLIVEActive();
+
+	//Get the NaverShopping platform pointer, the pointer is empty when the channel is not logged in
+	PLSPlatformChzzk *getPlatformChzzk();
+	PLSPlatformChzzk *getPlatformChzzkActive();
+
+	//Get the ncb2b platform pointer, the pointer is empty when the channel is not logged in
+	std::list<PLSPlatformNCB2B *> getPlatformNCB2B();
+	PLSPlatformNCB2B *getPlatformNCB2BActive();
 
 	//Platform onActive callback function
 	void activateCallback(const PLSPlatformBase *, bool) const;
@@ -251,7 +299,7 @@ public:
 	void stopGeneralMaxTimeLiveTimer();
 
 	//MQTT stopped
-	void stopMqtt();
+	void stopMqtt(DualOutputType outputType = DualOutputType::All);
 
 	//Receive client-sent chat messages from CEF
 	void doWebSendChatRequest(const QJsonObject &data) const;
@@ -264,8 +312,9 @@ public:
 
 	//When calling to end the live broadcast, the displayed reason for stopping the live broadcast
 	const QString &getLiveEndReason() const;
+	const EndLiveType getLiveEndType() const;
 	void setLiveEndReason(const QString &liveEndReason, EndLiveType endLiveType = EndLiveType::OTHER_TYPE);
-	void stopStreaming(const QString &reason, EndLiveType endLiveType = EndLiveType::OTHER_TYPE);
+	void stopStreaming(const QString &reason, EndLiveType endLiveType = EndLiveType::OTHER_TYPE, DualOutputType outputType = DualOutputType::All);
 
 	//send analog request
 	void createAnalogInfo(QVariantMap &uploadVariantMap) const;
@@ -275,20 +324,20 @@ public:
 	void sendRecordAnalog(const QVariantMap &info) const;
 	void sendAnalog(AnalogType type, const QVariantMap &info) const;
 	void sendBeautyAnalog(const QVariantMap &info) const;
-	void sendGiphyAnalog(const QVariantMap &info) const;
-	void sendTouchStickerAnalog(const QVariantMap &info) const;
 	void sendVirtualBgAnalog(const QVariantMap &info) const;
 	void sendDrawPenAnalog(const QVariantMap &info) const;
 	void sendSourceAnalog(const QVariantMap &info) const;
 	void sendFilterAnalog(const QVariantMap &info) const;
 	void sendBgmAnalog(const QVariantMap &info) const;
 	void sendVirtualCamAnalog(const QVariantMap &info) const;
-	void sendClockWidgetAnalog(const QVariantMap &info) const;
 	void sendBgTemplateAnalog(OBSData privious, OBSData current) const;
-	void sendAudioVisualizerAnalog(OBSData privious, OBSData current) const;
+	void sendAudioVisualizerAnalog(const char *id, OBSData privious, OBSData current) const;
 	void sendCameraDeviceAnalog(OBSData privious, OBSData current) const;
 	void sendAnalogOnUserConfirm(OBSSource source, OBSData privious, OBSData current) const;
 	void sendCodecAnalog(const QVariantMap &info) const;
+	void sendSceneTemplateAnalog(const QVariantMap &info) const;
+	void sendPlatformOutputGuideAnalog(const QVariantMap &info) const;
+	void sendNCB2BLogin(const QVariantMap &info) const;
 
 	void updateAllScheduleList();
 	void loadingWidzardCheck(bool isCheck = true);
@@ -302,6 +351,20 @@ public:
 
 	//Receive a message that the program has been closed
 	void ensureStopOutput();
+
+	// send live abort for live start api
+	QString getLiveAbortReason(LiveAbortStage stage, const QVariantMap &info = QVariantMap());
+	QString getLiveAbortDetailReason(LiveAbortDetailStage stage, const QVariantMap &info);
+	QString getLiveAbortPlatformName();
+
+	QString getLiveAbortObsErrorDetailReason(const QVariantMap &info);
+
+	// send live abort for live start api
+	void sendLiveAbortOperation(const QString &liveAbortReason, const QString &liveAbortDetailReason, int analogFailType);
+
+	bool AllowsMultiTrack() const;
+
+	static QString joinPlatformNames(const std::list<PLSPlatformBase *> &);
 
 signals:
 
@@ -388,13 +451,14 @@ public slots:
 	void onUpdateChannel(const QString &which);
 	void onAllChannelRefreshDone();
 	void onPrepareLive();
-	void onMqttMessage(const QString, const QString); //From different thread
+	void onMqttMessage(const QString&, const QString&, DualOutputType outputType); //From different thread
 	void doWebRequest(const QString &data);
 	void doChannelInitialized(); //All channels are refreshed and the GoLive button becomes Ready
 	void onPrepareFinish();
 
 	void onUpdateScheduleListFinished();
 
+	void addFailedPlatform(const std::list<PLSPlatformBase *>&);
 private:
 	//The function called during the preparation phase of the onPrepare method
 	//Display Multi-Platform Disable Live Alert with Resolutions greater than 1080p
@@ -408,12 +472,13 @@ private:
 	//MQTT  related
 	void doStatRequest(const QJsonObject &data);
 	void doMqttStatForPlatform(const PLSPlatformBase *base, const QJsonObject &data) const;
-	void doStatusRequest(const QJsonObject &data);
+	void doStatusRequest(const QJsonObject &data, DualOutputType outputType);
 	void doNoticeLong(const QJsonObject &data) const;
 	void doNaverShoppingMaxLiveTime(int leftMinutes) const;
+	void doNCPMaxLiveTime(const QJsonObject &data);
 	void doGeneralMaxLiveTime(int leftMinutes) const;
 	void doLiveFnishedByPlatform(const QJsonObject &data);
-	void doOtherMqttStatusType(const QJsonObject &data, const QString &statusType);
+	void doOtherMqttStatusType(const QJsonObject &data, const QString &statusType, DualOutputType outputType);
 
 	void doMqttRequestAccessToken(PLSPlatformBase *base) const;
 	void doMqttBroadcastStatus(const PLSPlatformBase *base, PLSPlatformMqttStatus status) const;
@@ -493,6 +558,7 @@ private:
 	PLSPlatformLiveStartedStatus m_bApiPrepared = PLSPlatformLiveStartedStatus::PLS_NONE;
 	PLSPlatformLiveStartedStatus m_bApiStarted = PLSPlatformLiveStartedStatus::PLS_NONE;
 	QString m_endLiveReason;
+	EndLiveType m_endLiveType = EndLiveType::NONE_TYPE;
 
 	bool m_bRecording = false;
 	bool m_bReplayBuffer = false;
@@ -500,7 +566,7 @@ private:
 	bool m_bVirtualCamera = false;
 
 	//Used for mqtt
-	QPointer<PLSMosquitto> m_pMQTT = nullptr;
+	std::array<QPointer<PLSMosquitto>, DualOutputType::All> m_pMQTT{};
 	QTimer m_timerMQTT;
 	QString m_strLastMqttChat;
 	QString m_strLastMqttStatus;
@@ -512,13 +578,20 @@ private:
 	bool m_isConnectedMQTT = false;
 	QMap<QString, int> m_taskWaiting;
 	PLSPlatformBase *m_generalPlatform{nullptr};
+	QMap<QString, QString> m_platFormUrlMap;
+
+	std::array<bool, DualOutputType::All> m_bStopStream{false};
+	std::list<PLSPlatformBase *> m_listFailedPlatform;
 };
 
 #define PLS_PLATFORM_API PLSPlatformApi::instance()
 
 #define PLS_PLATFORM_ALL PLS_PLATFORM_API->getAllPlatforms()
 #define PLS_PLATFORM_ACTIVIED PLS_PLATFORM_API->getActivePlatforms()
+#define PLS_PLATFORM_HORIZONTAL PLS_PLATFORM_API->getHorizontalPlatforms()
+#define PLS_PLATFORM_VERTICAL PLS_PLATFORM_API->getVerticalPlatforms()
 #define PLS_PLATFORM_TWITCH PLS_PLATFORM_API->getPlatformTwitch()
 #define PLS_PLATFORM_YOUTUBE PLS_PLATFORM_API->getPlatformYoutube()
 #define PLS_PLATFORM_FACEBOOK PLS_PLATFORM_API->getPlatformFacebook()
 #define PLS_PLATFORM_AFREECATV PLS_PLATFORM_API->getPlatformAfreecaTV()
+#define PLS_PLATFORM_CHZZK PLS_PLATFORM_API->getPlatformChzzk()

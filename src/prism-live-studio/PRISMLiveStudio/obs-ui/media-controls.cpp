@@ -1,5 +1,6 @@
 #include "window-basic-main.hpp"
 #include "media-controls.hpp"
+#include "pls-common-define.hpp"
 #include "obs-app.hpp"
 #include <QToolTip>
 #include <QStyle>
@@ -54,39 +55,49 @@ MediaControls::MediaControls(QWidget *parent)
 	ui->stopButton->setProperty("themeID", "stopIcon");
 	setFocusPolicy(Qt::StrongFocus);
 
-	connect(&mediaTimer, SIGNAL(timeout()), this,
-		SLOT(SetSliderPosition()));
-	connect(&seekTimer, SIGNAL(timeout()), this, SLOT(SeekTimerCallback()));
-	connect(ui->slider, SIGNAL(sliderPressed()), this,
-		SLOT(MediaSliderClicked()));
-	connect(ui->slider, SIGNAL(mediaSliderHovered(int)), this,
-		SLOT(MediaSliderHovered(int)));
-	connect(ui->slider, SIGNAL(sliderReleased()), this,
-		SLOT(MediaSliderReleased()));
-	connect(ui->slider, SIGNAL(sliderMoved(int)), this,
-		SLOT(MediaSliderMoved(int)));
+	connect(&mediaTimer, &QTimer::timeout, this,
+		&MediaControls::SetSliderPosition);
+	connect(&seekTimer, &QTimer::timeout, this,
+		&MediaControls::SeekTimerCallback);
+	connect(ui->slider, &AbsoluteSlider::sliderPressed, this,
+		&MediaControls::AbsoluteSliderClicked);
+	connect(ui->slider, &AbsoluteSlider::absoluteSliderHovered, this,
+		&MediaControls::AbsoluteSliderHovered);
+	connect(ui->slider, &AbsoluteSlider::sliderReleased, this,
+		&MediaControls::AbsoluteSliderReleased);
+	connect(ui->slider, &AbsoluteSlider::sliderMoved, this,
+		&MediaControls::AbsoluteSliderMoved);
 
 	countDownTimer = config_get_bool(App()->GlobalConfig(), "BasicWindow",
 					 "MediaControlsCountdownTimer");
 
 	QAction *restartAction = new QAction(this);
+	restartAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
 	restartAction->setShortcut({Qt::Key_R});
-	connect(restartAction, SIGNAL(triggered()), this, SLOT(RestartMedia()));
+	connect(restartAction, &QAction::triggered, this,
+		&MediaControls::RestartMedia);
 	addAction(restartAction);
 
 	QAction *sliderFoward = new QAction(this);
 	sliderFoward->setShortcutContext(Qt::WidgetWithChildrenShortcut);
-	connect(sliderFoward, SIGNAL(triggered()), this,
-		SLOT(MoveSliderFoward()));
+	connect(sliderFoward, &QAction::triggered, this,
+		&MediaControls::MoveSliderFoward);
 	sliderFoward->setShortcut({Qt::Key_Right});
 	addAction(sliderFoward);
 
 	QAction *sliderBack = new QAction(this);
 	sliderBack->setShortcutContext(Qt::WidgetWithChildrenShortcut);
-	connect(sliderBack, SIGNAL(triggered()), this,
-		SLOT(MoveSliderBackwards()));
+	connect(sliderBack, &QAction::triggered, this,
+		&MediaControls::MoveSliderBackwards);
 	sliderBack->setShortcut({Qt::Key_Left});
 	addAction(sliderBack);
+
+	QAction *playPause = new QAction(this);
+	playPause->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+	connect(playPause, &QAction::triggered, this,
+		&MediaControls::on_playPauseButton_clicked);
+	playPause->setShortcut({Qt::Key_Space});
+	addAction(playPause);
 }
 
 MediaControls::~MediaControls() {}
@@ -116,7 +127,7 @@ int64_t MediaControls::GetSliderTime(int val)
 	return seekTo;
 }
 
-void MediaControls::MediaSliderClicked()
+void MediaControls::AbsoluteSliderClicked()
 {
 	OBSSource source = OBSGetStrongRef(weakSource);
 	if (!source) {
@@ -137,7 +148,7 @@ void MediaControls::MediaSliderClicked()
 	seekTimer.start(100);
 }
 
-void MediaControls::MediaSliderReleased()
+void MediaControls::AbsoluteSliderReleased()
 {
 	OBSSource source = OBSGetStrongRef(weakSource);
 	if (!source) {
@@ -150,6 +161,7 @@ void MediaControls::MediaSliderReleased()
 			obs_source_media_set_time(source, GetSliderTime(seek));
 		}
 
+		UpdateLabels(seek);
 		seek = lastSeek = -1;
 	}
 
@@ -159,16 +171,17 @@ void MediaControls::MediaSliderReleased()
 	}
 }
 
-void MediaControls::MediaSliderHovered(int val)
+void MediaControls::AbsoluteSliderHovered(int val)
 {
 	float seconds = ((float)GetSliderTime(val) / 1000.0f);
 	QToolTip::showText(QCursor::pos(), FormatSeconds((int)seconds), this);
 }
 
-void MediaControls::MediaSliderMoved(int val)
+void MediaControls::AbsoluteSliderMoved(int val)
 {
 	if (seekTimer.isActive()) {
 		seek = val;
+		UpdateLabels(seek);
 	}
 	ui->slider->setValue(val);
 }
@@ -286,10 +299,23 @@ void MediaControls::RefreshControls()
 
 	OBSDataAutoRelease settings = obs_source_get_settings(source);
 	const char *localFile = obs_data_get_string(settings, "local_file");
-	if (!localFile || 0 == strlen(localFile)) {
+	if (pls_is_empty(localFile) &&
+	    pls_is_equal(id, common::MEDIA_SOURCE_ID)) {
 		SetRestartState();
 	} else {
 		obs_media_state state = obs_source_media_get_state(source);
+
+		if (state == OBS_MEDIA_STATE_OPENING) {
+			blog(LOG_INFO,
+			     "Media state is opening, refresh controls in 100ms");
+			QPointer<MediaControls> weakThis(this);
+			QTimer::singleShot(100, [weakThis]() {
+				if (weakThis) {
+					weakThis->RefreshControls();
+				}
+			});
+			return;
+		}
 
 		switch (state) {
 		case OBS_MEDIA_STATE_STOPPED:
@@ -353,19 +379,16 @@ void MediaControls::SetSliderPosition()
 	if (time < 1) {
 		return;
 	}
-	float sliderPosition = (time / duration) * (float)ui->slider->maximum();
+	float sliderPosition;
+
+	if (duration)
+		sliderPosition =
+			(time / duration) * (float)ui->slider->maximum();
+	else
+		sliderPosition = 0.0f;
 
 	ui->slider->setValue((int)sliderPosition);
-
-	ui->timerLabel->setText(FormatSeconds((int)(time / 1000.0f)));
-
-	if (!countDownTimer)
-		ui->durationLabel->setText(
-			FormatSeconds((int)(duration / 1000.0f)));
-	else
-		ui->durationLabel->setText(
-			QString("-") +
-			FormatSeconds((int)((duration - time) / 1000.0f)));
+	UpdateLabels((int)sliderPosition);
 }
 
 QString MediaControls::FormatSeconds(int totalSeconds)
@@ -532,4 +555,27 @@ void MediaControls::UpdateSlideCounter()
 		ui->timerLabel->setText("-");
 		ui->durationLabel->setText("-");
 	}
+}
+
+void MediaControls::UpdateLabels(int val)
+{
+	OBSSource source = OBSGetStrongRef(weakSource);
+	if (!source) {
+		return;
+	}
+
+	float duration = (float)obs_source_media_get_duration(source);
+	float percent = (float)val / (float)ui->slider->maximum();
+
+	float time = percent * duration;
+
+	ui->timerLabel->setText(FormatSeconds((int)(time / 1000.0f)));
+
+	if (!countDownTimer)
+		ui->durationLabel->setText(
+			FormatSeconds((int)(duration / 1000.0f)));
+	else
+		ui->durationLabel->setText(
+			QString("-") +
+			FormatSeconds((int)((duration - time) / 1000.0f)));
 }

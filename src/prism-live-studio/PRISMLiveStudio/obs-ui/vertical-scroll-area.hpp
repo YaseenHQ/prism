@@ -2,6 +2,7 @@
 
 #include <QScrollArea>
 #include "PLSCommonScrollBar.h"
+#include "libui.h"
 
 class QResizeEvent;
 
@@ -13,6 +14,7 @@ public:
 	{
 		this->setVerticalScrollBar(new PLSCommonScrollBar());
 		setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+		pls_scroll_area_clips_to_bounds(this);
 	}
 
 protected:

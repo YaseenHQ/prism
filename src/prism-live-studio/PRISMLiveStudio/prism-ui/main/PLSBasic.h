@@ -9,23 +9,28 @@
 #include "PLSBasicStatusBar.hpp"
 #include "PLSBasicStatusPanel.hpp"
 #include "PLSRegionCapture.h"
-
+#include "audio-mixer/PLSAudioMixer.h"
+#include "ncb2b/PLSNCB2bBrowserSettings.h"
 #include <set>
+#include "PLSSceneTemplateContainer.h"
+#include "obs.h"
 
 class HookNativeEvent;
 class PLSBackgroundMusicView;
 struct pls_frontend_callbacks;
 struct QCefCookieManager;
-
+constexpr int RESTARTAPP = 1024;
+constexpr int NEED_RESTARTAPP = 1025;
 extern const std::vector<QString> presetColorListWithOpacity;
 
 using BgmSourceVecType = std::vector<std::pair<QString, quint64>>;
-
+using setAlertParent = std::function<void(QWidget *)>;
 enum class PlatformType {
 	Empty = 0,
 
 	Others = 0x0001,
 	Band = 0x0002,
+	NCP = 0x0003,
 	CustomRTMP = 0x0004,
 	BandAndCustomRTMP = Band | CustomRTMP,
 
@@ -36,6 +41,33 @@ enum class PlatformType {
 	MpBandAndCustomRTMP = MultiPlatform | Band | CustomRTMP
 };
 enum class RestartAppType { Direct = 0, Logout, ChangeLang, Update };
+
+enum class ShowType { ST_Show, ST_Hide, ST_Switch };
+
+class GameCaptureResult {
+public:
+	std::string exeVersion = "unknown";
+	std::string gameTitle = "unknown";
+	std::string gameExe = "unknown";
+
+	std::string sourceName = "unknown";
+	std::string sourceId = "unknown";
+
+	struct Result {
+		std::string str = "undefined";
+		bool captured = false;
+	};
+
+	GameCaptureResult(const std::string &exe, const std::string &version, const std::string &title, const std::string &source_name, const std::string &source_id);
+	bool foundResult(Result result);
+	bool isCaptured();
+	void insertResult(Result result);
+	std::string getLastFailedResult();
+
+private:
+	std::recursive_mutex m_lockCaptureResult;
+	std::vector<Result> captureResultList;
+};
 
 class CheckCamProcessWorker : public QObject {
 	Q_OBJECT
@@ -113,7 +145,7 @@ public:
 	void replaceMenuActionWithWidgetAction(QMenuBar *menuBar, QAction *originAction, QWidgetAction *replaceAction);
 	void replaceMenuActionWithWidgetAction(QMenu *menu, QAction *originAction, QWidgetAction *replaceAction);
 	void CheckAppUpdate();
-	void CheckAppUpdateFinished();
+	void CheckAppUpdateFinished(const PLSErrorHandler::RetData &retData);
 	int compareVersion(const QString &v1, const QString &v2) const;
 	int getUpdateResult() const;
 	bool ShowUpdateView(QWidget *parent);
@@ -121,7 +153,7 @@ public:
 	void initSideBarWindowVisible();
 	bool CheckStreamEncoder() const;
 	void restartAppDirect(bool isUpdate);
-	void restartApp(const RestartAppType &restartType = RestartAppType::Direct);
+	static void restartApp(const RestartAppType &restartType = RestartAppType::Direct, const QStringList &params = QStringList());
 
 	//browser interaction
 	bool CheckHideInteraction(OBSSceneItem items);
@@ -131,8 +163,8 @@ public:
 	void OnRemoveSceneItem(OBSSceneItem item);
 
 	void ShowLoadSceneCollectionError();
-	bool checkMainViewClose(QCloseEvent *event);
 	virtual void closeMainBegin() override;
+	virtual bool checkMainViewClose(QCloseEvent *event) override;
 	virtual void closeMainFinished() override;
 
 	void CreateToolArea();
@@ -143,6 +175,12 @@ public:
 	void ResizeDrawPenCursorPixmap() const;
 	bool ShowStickerView(const char *id);
 	void OnSourceCreated(const char *id);
+	bool ShouldShowMixerTip() const;
+	void ShowAudioMixerTips();
+	void ShowOutputStreamErrorAlert(int code, QString last_error, QWidget *parent);
+	void ShowOutputRecordErrorAlert(int code, QString last_error, QWidget *parent);
+	void ShowReplayBufferErrorAlert(int code, QString last_error, QWidget *parent);
+	QString getOutputStreamErrorAlert(int code, const QString &last_error);
 
 	bool GetSourceIcon(QIcon &icon, int type) const override;
 	QIcon GetViewerCountIcon() const;
@@ -176,18 +214,20 @@ public:
 	void SetAppAudioIcon(const QIcon &icon);
 	void SetDecklinkInputIcon(const QIcon &icon);
 
-	static void InitBrowserPanelSafeBlock();
-	static QCefCookieManager *getBrowserPannelCookieMgr(const QString &pannelName);
+	static QCefCookieManager *getBrowserPannelCookieMgr(const QString &channelName);
 	static void delPannelCookies(const QString &pannelName);
 	static void setManualPannelCookies(const QString &pannelName);
 	static QString cookiePath(const QString &pannelName);
 	// scene display method
-	void SetSceneDisplayMethod(int method) const;
+	void showChangeSceneDisplayAlert();
+	void SetSceneDisplayMethod(int method);
 	int GetSceneDisplayMethod() const;
 	QMenu *CreateSceneDisplayMenu();
+	void SetDpi(float dpi);
 
 	QString getStreamState() const;
 	QString getRecordState() const;
+	int getRecordDuration() const;
 
 	OBSDock *GetChatDock() const { return ui->chatDock; }
 	void InitChatDockGeometry();
@@ -195,7 +235,7 @@ public:
 
 	void OnBrowserDockSeperatedBtnClicked();
 	void OnBrowserDockTopLevelChanged();
-	void CreateAdvancedButtonForBrowserDock(OBSDock *dock, const QString &uuid);
+	void CreateAdvancedButtonForBrowserDock(OBSDock *dock, const QString &uuid, bool bDetach = false);
 	void setDockDetachEnabled(bool dockLocked);
 
 	static void frontendEventHandler(enum obs_frontend_event event, void *private_data);
@@ -205,11 +245,25 @@ public:
 	void graphicsCardNotice() const;
 	void UpdateAudioMixerMenuTxt();
 
-	bool _isSupportHEVC(const QVariantMap &info) const;
-	bool _isSupportHEVC();
-	bool CheckHEVC();
+	bool CheckSupportEncoder(QString &encoderId);
+	bool IsSupportEncoder(const QString &encoderId);
+	bool CheckAndModifyAAC();
 	void showSettingVideo();
 	bool isAppUpadting() const;
+	void setAlertParentWithBanner(setAlertParent cb);
+
+	PLSMixerOrderHelper mixerOrder;
+
+	const QString &getServiceName() const;
+
+	bool IsOutputActivated(obs_output *output);
+	void ActivateOutput(obs_output *output);
+	void DeactivateOutput(obs_output *output);
+
+	void updateSourceIcon();
+	bool getSourceLoaded();
+
+	void ForceUpdateGroupsSize();
 
 public slots:
 	void OnSideBarButtonClicked(int buttonId);
@@ -237,6 +291,7 @@ public slots:
 	void on_stats_triggered();
 	void on_actionStudioMode_triggered();
 	void on_actionShowVideosFolder_triggered() const;
+	void on_actionPrismPolicy_triggered() const;
 
 	void on_checkUpdate_triggered();
 	void actionLaboratory_triggered();
@@ -244,9 +299,11 @@ public slots:
 	void OnStickerClicked();
 	void OnPrismStickerClicked();
 	void OnStickerApply(const QString &fileName, const GiphyData &taskData);
-	void AddStickerSource(const char *id, const QString &file, const GiphyData &giphyData);
+	void AddGiphyStickerSource(const QString &file, const GiphyData &giphyData, OBSSource &sourceOut);
+	bool AddPRISMStickerSource(const StickerHandleResult &data, OBSSource &sourceOut);
 	void CheckStickerSource() const;
 	void OnDrawPenClicked() const;
+	void OnSceneTemplateClicked(ShowType);
 	void OnCamStudioClicked(QStringList arguments, QWidget *parent);
 	bool CheckCamStudioInstalled(QString &program);
 	void ShowInstallCamStudioTips(QWidget *parent, QString title, QString content, QString okTip, QString cancelTip);
@@ -256,6 +313,8 @@ public slots:
 	void OnStickerDownloadCallback(const TaskResponData &responData);
 	void InitGiphyStickerViewVisible();
 	void InitPrismStickerViewVisible();
+	void InitDualOutputEnabled();
+	void OnMixerOrderChanged();
 
 	void OnSetBgmViewVisible(bool state);
 	void RenameBgmSourceName(obs_sceneitem_t *sceneItem, const QString &newName, const QString &prevName);
@@ -278,7 +337,7 @@ public slots:
 	void adjustFileMenu();
 	void initVirtualCamMenu();
 	void initLabMenu();
-	void rehearsalSwitchedToLive() const;
+	void rehearsalSwitchedToLive();
 	void showMainViewAfter(QWidget *parentWidget);
 	void startDownloading();
 	void OpenRegionCapture();
@@ -289,18 +348,48 @@ public slots:
 	//get the rehearsal or live start time stamp
 	uint getStartTimeStamp() const;
 
+	void updateMainViewAlwayTop();
+
+	void checkTwitchAudio();
+	void checkTwitchAudioWithUuid(const QString &channelUUID);
+	void checkTwitchAudioWithLeader(bool bLeader);
+
+	bool checkRecEncoder();
+	void removeChzzkSponsorSource();
+	void setAllChzzkSourceSetting(const QString &platformName);
+	bool setChzzkSponsorSourceSetting(obs_source_t *source);
+	bool bSuccessGetChzzkSourceUrl(QWidget *parent);
+
+	void createNcb2bBrowserSettings();
+	void onBrowserSettingsClicked();
+	void initNcb2bBrowserSettingsVisible();
+
+	void ReorderAudioMixer();
+
+	void setServiceName(QString strServiceName);
+
+	void onDualOutputClicked();
+	bool checkStudioMode();
+	bool setDualOutputEnabled(bool bEnabled, bool bShowSetting);
+	void showDualOutputTitle(bool bVisible);
+	void showVerticalDisplay(bool bVisible);
+	void showHorizontalDisplay(bool bVisible);
+	void changeOutputCount(int);
+
 public:
 	static void MediaStateChanged(void *data, calldata_t *calldata);
 	static void MediaLoad(void *data, calldata_t *calldata);
 	static void PropertiesChanged(void *param, calldata_t *data);
-	static void MediaRestarted(void *param, calldata_t *data);
 
 	static void OnSourceNotify(void *data, calldata_t *calldata);
 	static void OnSourceMessage(void *data, calldata_t *calldata);
 
+	static void RenderVerticalProgram(void *data, uint32_t cx, uint32_t cy);
+
 protected:
 	void showEvent(QShowEvent *event) override;
 	void resizeEvent(QResizeEvent *event) override;
+	bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
 	QPushButton *CreateSourcePopupMenuCustomWidget(const char *id, const QString &display, const QSize &iconSize);
@@ -309,7 +398,7 @@ private:
 
 	// scene collection
 	void OnExportSceneCollectionClicked();
-	void StartSaveSceneCollectionTimer();
+	void StartUpdateSceneCollectionTimeTimer();
 
 	void OnSceneDockTopLevelChanged();
 	void OnSourceDockTopLevelChanged();
@@ -324,6 +413,7 @@ private:
 	QStringList getRestartParams(bool isUpdate);
 	void ClearStickerCache() const;
 	void InitInteractData() const;
+	void SaveInteractData() const;
 	bool hasSourceMonitor() const;
 	void updateInfoViewShow();
 	void getLocalUpdateResult();
@@ -331,13 +421,14 @@ private:
 	void InitCamStudioSidebarState();
 	void CreateCheckCamProcessThread(const QString &processName);
 
+	void CreatePreviewTitle();
+
 private slots:
-	void OnSaveSceneCollectionTimerTriggered();
+	void OnUpdateSceneCollectionTimeTimerTriggered();
 	void CreateGiphyStickerView();
 	void CreatePrismStickerView();
-	void AddPRISMStickerSource(const StickerHandleResult &data);
 
-	obs_source_t *CreateSource(const char *id, obs_data_t *settings = nullptr);
+	bool CreateSource(const char *id, OBSSource &newSource, obs_data_t *settings = nullptr);
 
 	// bgm
 	void OnBgmClicked();
@@ -354,6 +445,9 @@ private slots:
 signals:
 	void backgroundTemplateSourceError(int msg, int code);
 	void outputStateChanged();
+	void goLiveCheckTooltip();
+	void sigOpenDualOutput(bool bOpen);
+	void sigOutputActiveChanged(bool);
 
 private:
 #if defined(Q_OS_WIN)
@@ -366,6 +460,8 @@ private:
 	QPointer<PLSPrismSticker> prismStickerView;
 	QPointer<PLSBackgroundMusicView> backgroundMusicView;
 	QPointer<PLSRegionCapture> regionCapture;
+	QPointer<PLSNCB2bBrowserSettings> ncb2bBrowserSettings{nullptr};
+
 	void *interaction_sceneitem_pointer = nullptr;
 	QPointer<PLSBasicStatusPanel> m_dialogStatusPanel;
 	pls_process_t *camStudioProcess = nullptr;
@@ -404,7 +500,10 @@ private:
 	bool m_isStartCategoryRequest = false;
 	bool gpopDataInited = false;
 	bool isAudioMonitorToastDisplay = false;
-	std::set<std::string> m_hook_failed_game_list;
+
+	std::recursive_mutex m_lockGameCaptureResultMap;
+	std::map<std::string, std::shared_ptr<GameCaptureResult>> m_gameCaptureResultMap;
+
 	std::map<uint64_t, QString> stickerSourceMap;
 	CheckCamProcessWorker *checkCamProcessWorker = nullptr;
 	QThread checkCamThread;
@@ -414,4 +513,14 @@ private:
 	QAction *actionRealTime = nullptr;
 	QAction *actionThumbnail = nullptr;
 	QAction *actionText = nullptr;
+	PLSSceneTemplateContainer *m_sceneTemplate{nullptr};
+
+	QString m_strServiceName;
+	std::recursive_mutex m_outputActivateMutex;
+	std::set<void *> m_outputActivating;
+
+	bool m_bOutputActive = false;
+	int m_iOutputCount = 0;
+
+	QPointer<PLSDualOutputTitle> dualOutputTitle;
 };

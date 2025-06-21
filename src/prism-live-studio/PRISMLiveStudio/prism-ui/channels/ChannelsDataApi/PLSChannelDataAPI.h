@@ -12,6 +12,8 @@
 #include <QWriteLocker>
 #include "ChannelDefines.h"
 #include "PLSChannelPublicAPI.h"
+#include "PLSDualOutputConst.h"
+#include "PLSErrorHandler.h"
 #include "pls-channel-const.h"
 
 class QNetworkAccessManager;
@@ -33,8 +35,6 @@ void updatePlatformViewerCount();
 
 class PLSChannelDataAPI final : public QObject, public PLSChannelPublicAPI {
 	Q_OBJECT
-	//Q_PLUGIN_METADATA(IID "PLSChannelPublicAPI.plugin")
-	//Q_INTERFACES(PLSChannelPublicAPI)
 public:
 	explicit PLSChannelDataAPI(QObject *parent = nullptr);
 	~PLSChannelDataAPI() override = default;
@@ -111,7 +111,7 @@ public:
 	int count() const;
 
 	/*current selected channels */
-	ChannelsMap getCurrentSelectedChannels(int Type = 0) const;
+	ChannelsMap getCurrentSelectedChannels(int Type = 0);
 
 	/*get current selected channels number*/
 	int currentSelectedCount() const;
@@ -258,6 +258,16 @@ public:
 
 	const QMap<QString, QString> &getRTMPInfos();
 
+	QStringList getUuidListOfRISTandSRT();
+
+	void addRISTandSRT2RtmpServer();
+
+	void getChannelCountOfOutputDirection(QStringList &horOutputList, QStringList &verOutputList);
+	void setChannelDefaultOutputDirection();
+	void setOutputDirectionWhenAddChannel(const QString &uuid);
+	bool isCanSetDualOutput(const QString &uuid) const;
+	void clearDualOutput();
+
 public slots:
 
 	void stopAll();
@@ -280,7 +290,10 @@ signals:
 	void channelModified(const QString &channelUUID);
 	void channelExpired(const QString &channelUUID, bool toAsk = true);
 	void channelGoToInitialize(const QString &channelUUID);
-
+	void addChannelForDashBord(const QString &uuid) const;
+	void channelRemovedForCheckVideo(bool bLeader);
+	void channelRemovedForChzzk();
+	void channelRefreshEnd(const QString &platformName);
 	/*recording sigs*/
 	void toStartRecord();
 	void toStopRecord();
@@ -298,7 +311,7 @@ signals:
 
 	/*broadcast sigs*/
 	void toStartBroadcast();
-	void toStopBroadcast();
+	void toStopBroadcast(DualOutputType outputType = DualOutputType::All);
 	void toStartBroadcastInInfoView();
 	void toStartRehearsal();
 	void toStopRehearsal();
@@ -336,7 +349,7 @@ signals:
 
 	void networkInvalidOcurred();
 
-	void prismTokenExpired();
+	void prismTokenExpired(const PLSErrorHandler::RetData &data);
 
 	void sigSendRequest(const QString &uuid);
 
@@ -354,13 +367,20 @@ signals:
 
 	void tokenRefreshed(const QString &uuid, int returnCode);
 
-	void sigAllChannelRefreshDone();
+	void sigOperationChannelDone();
+
+	void startFailed();
+
+	void sigB2BChannelEndLivingCheckExpired(const QString &channelName);
+
+	void sigSetChannelDualOutput(const QString &uuid, ChannelData::ChannelDualOutput outputType);
 
 private:
 	void registerEnumsForStream() const;
 	void connectSignals();
 	void reCheckExpiredChannels();
 	void resetData() const;
+	ChannelsMap getMatchKeysInfos(const QVariantMap &keysMap);
 
 	//delete function to copy
 	PLSChannelDataAPI(const PLSChannelDataAPI &) = delete;

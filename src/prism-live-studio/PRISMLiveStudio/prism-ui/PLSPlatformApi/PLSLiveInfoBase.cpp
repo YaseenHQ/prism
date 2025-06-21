@@ -13,12 +13,28 @@
 //#include "main-view.hpp"
 #include "ResolutionGuidePage.h"
 #include "libutils-api.h"
+#include "PLSChannelDataAPI.h"
+#include "ChannelCommonFunctions.h"
+#include "pls/pls-dual-output.h"
 
 PLSLiveInfoBase::PLSLiveInfoBase(PLSPlatformBase *pPlatformBase, QWidget *parent) : PLSDialogView(parent), m_pPlatformBase(pPlatformBase), m_pWidgetLoadingBG(nullptr)
 {
 	pls_add_css(this, {"PLSLoadingBtn", "PLSLiveInfoBase"});
 	setHasCloseButton(false);
 	setResizeEnabled(false);
+
+	channelUUid = m_pPlatformBase->getChannelUUID();
+
+	connect(
+		PLSCHANNELS_API, &PLSChannelDataAPI::channelRemoved, this,
+		[this](const QString &uuid) {
+			if (uuid == channelUUid) {
+				pls_notify_close_modal_views_with_parent(this);
+				close();
+			}
+		},
+		Qt::QueuedConnection);
+
 #if defined(Q_OS_MACOS)
 	setFixedSize({720, 670});
 #else
@@ -94,7 +110,9 @@ void PLSLiveInfoBase::hideLoading()
 void PLSLiveInfoBase::showEvent(QShowEvent *event)
 {
 	PLSDialogView::showEvent(event);
-	ResolutionGuidePage::checkResolution(this, m_pPlatformBase->getChannelUUID());
+	if (m_pPlatformBase) {
+		ResolutionGuidePage::checkResolution(this, m_pPlatformBase->getChannelUUID());
+	}
 }
 
 bool PLSLiveInfoBase::eventFilter(QObject *watcher, QEvent *event)
@@ -123,7 +141,70 @@ void PLSLiveInfoBase::closeEvent(QCloseEvent *event)
 	PLSDialogView::closeEvent(event);
 }
 
-QWidget *PLSLiveInfoBase::createResolutionButtonsFrame()
+QWidget *PLSLiveInfoBase::createResolutionButtonsFrame(bool bNcp)
 {
-	return ResolutionGuidePage::createResolutionButtonsFrame(this);
+	return ResolutionGuidePage::createResolutionButtonsFrame(this, bNcp);
+}
+
+PLSLiveInfoDualWidget::PLSLiveInfoDualWidget(QWidget *parent) : QWidget(parent)
+{
+	QHBoxLayout *l = new QHBoxLayout(this);
+	l->setAlignment(Qt::AlignLeft);
+	l->setContentsMargins({});
+	l->setSpacing(5);
+
+	m_imgLabel = new QLabel(this);
+	m_imgLabel->setObjectName("dualImageLabel");
+	l->addWidget(m_imgLabel);
+
+	m_titleLabel = new QLabel(this);
+	m_titleLabel->setObjectName("dualTitleLabel");
+	l->addWidget(m_titleLabel);
+
+	connect(PLSChannelDataAPI::getInstance(), &PLSChannelDataAPI::sigSetChannelDualOutput, this, &PLSLiveInfoDualWidget::onPlatformDualChanged, Qt::QueuedConnection);
+}
+PLSLiveInfoDualWidget *PLSLiveInfoDualWidget::setText(const QString &text)
+{
+	m_titleLabel->setText(text);
+	return this;
+}
+
+void PLSLiveInfoDualWidget::onPlatformDualChanged(const QString &uuid, ChannelData::ChannelDualOutput outputType)
+{
+	pls_check_app_exiting();
+	if (uuid == m_channelUuid) {
+		setUIIconStyle(outputType);
+	}
+}
+
+PLSLiveInfoDualWidget *PLSLiveInfoDualWidget::setUUID(const QString &channelUuid)
+{
+	m_channelUuid = channelUuid;
+	auto outputType = PLSCHANNELS_API->getValueOfChannel(channelUuid, ChannelData::g_channelDualOutput, channel_data::NoSet);
+	return setUIIconStyle(outputType);
+}
+
+PLSLiveInfoDualWidget *PLSLiveInfoDualWidget::setUIIconStyle(ChannelData::ChannelDualOutput outputType)
+{
+	if (!pls_is_dual_output_on()) {
+		outputType = channel_data::NoSet;
+	}
+	switch (outputType) {
+	case channel_data::NoSet:
+		pls_flush_style(this, "dualModel", "no");
+		m_imgLabel->setVisible(false);
+		break;
+	case channel_data::HorizontalOutput:
+		pls_flush_style(this, "dualModel", "h");
+		m_imgLabel->setVisible(true);
+		break;
+	case channel_data::VerticalOutput:
+		pls_flush_style(this, "dualModel", "v");
+		m_imgLabel->setVisible(true);
+		break;
+	default:
+		m_imgLabel->setVisible(false);
+		break;
+	}
+	return this;
 }

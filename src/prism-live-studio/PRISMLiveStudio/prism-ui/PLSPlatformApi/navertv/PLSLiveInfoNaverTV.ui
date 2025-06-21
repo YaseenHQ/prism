@@ -43,7 +43,7 @@
        <height>195</height>
       </size>
      </property>
-     <widget class="QLabel" name="nvtTitleLabel">
+     <widget class="PLSLiveInfoDualWidget" name="dualWidget" native="true">
       <property name="geometry">
        <rect>
         <x>25</x>
@@ -51,12 +51,6 @@
         <width>181</width>
         <height>81</height>
        </rect>
-      </property>
-      <property name="text">
-       <string>NAVER TV</string>
-      </property>
-      <property name="alignment">
-       <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignTop</set>
       </property>
      </widget>
      <widget class="PLSSelectImageButton" name="thumbnailButton">
@@ -247,19 +241,6 @@
        </spacer>
       </item>
       <item>
-       <widget class="QPushButton" name="okButton">
-        <property name="focusPolicy">
-         <enum>Qt::NoFocus</enum>
-        </property>
-        <property name="text">
-         <string>OK</string>
-        </property>
-        <property name="useFor" stdset="0">
-         <string notr="true">Ok</string>
-        </property>
-       </widget>
-      </item>
-      <item>
        <widget class="QPushButton" name="cancelButton">
         <property name="focusPolicy">
          <enum>Qt::NoFocus</enum>
@@ -282,6 +263,19 @@
         </property>
        </widget>
       </item>
+      <item>
+       <widget class="QPushButton" name="okButton">
+        <property name="focusPolicy">
+         <enum>Qt::NoFocus</enum>
+        </property>
+        <property name="text">
+         <string>OK</string>
+        </property>
+        <property name="useFor" stdset="0">
+         <string notr="true">Ok</string>
+        </property>
+       </widget>
+      </item>
      </layout>
     </widget>
    </item>
@@ -294,9 +288,15 @@
    <header>PLSScheduleCombox.h</header>
   </customwidget>
   <customwidget>
+   <class>PLSLiveInfoDualWidget</class>
+   <extends>QWidget</extends>
+   <header>PLSLiveInfoBase.h</header>
+   <container>1</container>
+  </customwidget>
+  <customwidget>
    <class>PLSSelectImageButton</class>
    <extends>QLabel</extends>
-   <header>plsselectimagebutton.h</header>
+   <header>PLSSelectImageButton.h</header>
   </customwidget>
  </customwidgets>
  <resources/>

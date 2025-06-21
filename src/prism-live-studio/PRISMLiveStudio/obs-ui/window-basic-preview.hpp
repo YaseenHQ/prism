@@ -18,7 +18,9 @@ class QMouseEvent;
 #define ITEM_BOTTOM (1 << 3)
 #define ITEM_ROT (1 << 4)
 
-#define ZOOM_SENSITIVITY 1.125f
+#define MAX_SCALING_LEVEL 20
+#define MAX_SCALING_AMOUNT 10.0f
+#define ZOOM_SENSITIVITY pow(MAX_SCALING_AMOUNT, 1.0f / MAX_SCALING_LEVEL)
 
 #define SPACER_LABEL_MARGIN 10.0f
 
@@ -65,6 +67,7 @@ private:
 	vec2 lastMoveOffset;
 	vec2 scrollingFrom;
 	vec2 scrollingOffset;
+	vec2 lastDrawPenPos = {0, 0};
 	bool mouseDown = false;
 	bool mouseMoved = false;
 	bool mouseOverItems = false;
@@ -74,6 +77,9 @@ private:
 	bool scrollMode = false;
 	bool fixedScaling = false;
 	bool selectionBox = false;
+	bool overflowHidden = false;
+	bool overflowSelectionHidden = false;
+	bool overflowAlwaysVisible = false;
 	int32_t scalingLevel = 0;
 	float scalingAmount = 1.0f;
 	float groupRot = 0.0f;
@@ -85,7 +91,9 @@ private:
 	std::vector<obs_sceneitem_t *> selectedItems;
 	std::mutex selectMutex;
 
-	static vec2 GetMouseEventPos(QMouseEvent *event);
+	bool m_bVerticalDisplay = false;
+
+	vec2 GetMouseEventPos(QMouseEvent *event, bool horizontal);
 	static bool FindSelected(obs_scene_t *scene, obs_sceneitem_t *item,
 				 void *param);
 	static bool DrawSelectedOverflow(obs_scene_t *scene,
@@ -95,13 +103,14 @@ private:
 	static bool DrawSelectionBox(float x1, float y1, float x2, float y2,
 				     gs_vertbuffer_t *box);
 
-	static OBSSceneItem GetItemAtPos(const vec2 &pos, bool selectBelow);
-	static bool SelectedAtPos(const vec2 &pos);
+	static OBSSceneItem GetItemAtPos(OBSBasicPreview *preview,
+					 const vec2 &pos, bool selectBelow);
+	static bool SelectedAtPos(OBSBasicPreview *preview, const vec2 &pos);
 
-	static void DoSelect(const vec2 &pos);
-	static void DoCtrlSelect(const vec2 &pos);
+	static void DoSelect(OBSBasicPreview *preview, const vec2 &pos);
+	static void DoCtrlSelect(OBSBasicPreview *preview, const vec2 &pos);
 
-	static vec3 GetSnapOffset(const vec3 &tl, const vec3 &br);
+	vec3 GetSnapOffset(const vec3 &tl, const vec3 &br);
 
 	void GetStretchHandleData(const vec2 &pos, bool ignoreGroup);
 
@@ -114,7 +123,7 @@ private:
 	void StretchItem(const vec2 &pos);
 	void RotateItem(const vec2 &pos);
 
-	static void SnapItemMovement(vec2 &offset);
+	void SnapItemMovement(vec2 &offset);
 	void MoveItems(const vec2 &pos);
 	void BoxItems(const vec2 &startPos, const vec2 &pos);
 
@@ -143,6 +152,7 @@ public:
 	virtual void mouseMoveEvent(QMouseEvent *event) override;
 	virtual void leaveEvent(QEvent *event) override;
 	virtual void tabletEvent(QTabletEvent *event) override;
+	virtual void focusOutEvent(QFocusEvent *event) override;
 
 	void DrawOverflow();
 	void DrawSceneEditing();
@@ -176,6 +186,29 @@ public:
 	inline float GetScrollX() const { return scrollingOffset.x; }
 	inline float GetScrollY() const { return scrollingOffset.y; }
 
+	inline void SetOverflowHidden(bool hidden) { overflowHidden = hidden; }
+	inline void SetOverflowSelectionHidden(bool hidden)
+	{
+		overflowSelectionHidden = hidden;
+	}
+	inline void SetOverflowAlwaysVisible(bool visible)
+	{
+		overflowAlwaysVisible = visible;
+	}
+
+	inline bool GetOverflowSelectionHidden() const
+	{
+		return overflowSelectionHidden;
+	}
+	inline bool GetOverflowAlwaysVisible() const
+	{
+		return overflowAlwaysVisible;
+	}
+
+	void setVerticalDisplay(bool bValue) { m_bVerticalDisplay = bValue; }
+
+	bool isVerticalDisplay() const { return m_bVerticalDisplay; }
+
 	/* use libobs allocator for alignment because the matrices itemToScreen
 	 * and screenToItem may contain SSE data, which will cause SSE
 	 * instructions to crash if the data is not aligned to at least a 16
@@ -187,4 +220,5 @@ public:
 	int spacerPx[4] = {0};
 
 	void DrawSpacingHelpers();
+	void ClampScrollingOffsets();
 };

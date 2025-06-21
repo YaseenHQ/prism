@@ -1,5 +1,5 @@
 /******************************************************************************
-    Copyright (C) 2014 by Hugh Bailey <obs.jim@gmail.com>
+    Copyright (C) 2023 by Lain Bailey <lain@obsproject.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -24,6 +24,9 @@
 #include "pls-common-define.hpp"
 #include "PLSBasic.h"
 #include "PLSRadioButton.h"
+#include "PLSPlatformApi.h"
+#include "PLSSceneitemMapManager.h"
+#include "pls/pls-dual-output.h"
 
 using namespace common;
 
@@ -57,6 +60,18 @@ struct AddSourceData {
 	}
 
 	void setAlignment(uint32_t value) { itemInfo.alignment = value; }
+	void setBounds(obs_bounds_type type = OBS_BOUNDS_NONE,
+		       uint32_t value = OBS_ALIGN_CENTER)
+	{
+		itemInfo.bounds_type = type;
+		itemInfo.bounds_alignment = value;
+
+		vec2 baseSize;
+		baseSize.x = (float)obs_source_get_width(source);
+		baseSize.y = (float)obs_source_get_height(source);
+
+		vec2_set(&itemInfo.bounds, baseSize.x, baseSize.y);
+	}
 
 	void centerShow(int width = 0, int height = 0)
 	{
@@ -133,7 +148,7 @@ struct AddSourceData {
 bool OBSBasicSourceSelect::EnumSources(void *data, obs_source_t *source)
 {
 	if (obs_source_is_hidden(source))
-		return false;
+		return true;
 
 	OBSBasicSourceSelect *window =
 		static_cast<OBSBasicSourceSelect *>(data);
@@ -172,7 +187,7 @@ void OBSBasicSourceSelect::OBSSourceAdded(void *data, calldata_t *calldata)
 		static_cast<OBSBasicSourceSelect *>(data);
 	obs_source_t *source = (obs_source_t *)calldata_ptr(calldata, "source");
 
-	QMetaObject::invokeMethod(window, "SourceAdded",
+	QMetaObject::invokeMethod(window, "SourceAdded", Qt::QueuedConnection,
 				  Q_ARG(OBSSource, source));
 }
 
@@ -222,11 +237,11 @@ static void AddSource(void *_data, obs_scene_t *scene)
 	sceneitem = obs_scene_add(scene, data->source);
 
 	if (data->setpos) {
-		obs_sceneitem_set_info(sceneitem, &data->itemInfo);
+		obs_sceneitem_set_info2(sceneitem, &data->itemInfo);
 	}
 
 	if (data->transform != nullptr)
-		obs_sceneitem_set_info(sceneitem, data->transform);
+		obs_sceneitem_set_info2(sceneitem, data->transform);
 	if (data->crop != nullptr)
 		obs_sceneitem_set_crop(sceneitem, data->crop);
 	if (data->blend_method != nullptr)
@@ -286,14 +301,15 @@ static void AddExisting(OBSSource source, bool visible, bool duplicate,
 	data.blend_mode = blend_mode;
 
 	const char *id = obs_source_get_id(source);
-	if (pls_is_equal(id, PRISM_CHAT_SOURCE_ID)) {
+	if (pls_is_equal(id, PRISM_CHATV2_SOURCE_ID)) {
 		data.centerShow();
 	} else if (pls_is_equal(id, PRISM_SPECTRALIZER_SOURCE_ID)) {
 		data.centerShow(SPECTRALIZER_MIN_WIDTH);
 	} else if (pls_is_equal(id, PRISM_MOBILE_SOURCE_ID) ||
 		   pls_is_equal(id, PRISM_TIMER_SOURCE_ID) ||
 		   pls_is_equal(id, PRISM_VIEWER_COUNT_SOURCE_ID) ||
-		   pls_is_equal(id, PRISM_TEXT_TEMPLATE_ID)) {
+		   pls_is_equal(id, PRISM_TEXT_TEMPLATE_ID) ||
+		   pls_is_equal(id, PRISM_CHZZK_SPONSOR_SOURCE_ID)) {
 		//PRISM/WuLongyue/20201222/#6214/For PRISM Mobile source: Use center point to rotate
 		/** Compatible with other source
 				* Either here or obs-scene.cpp::obs_scene_add_internal
@@ -338,11 +354,15 @@ bool AddNew(QWidget *parent, const char *id, const char *name,
 	} else {
 		const char *v_id = obs_get_latest_input_type_id(id);
 		source = obs_source_create(v_id, name, NULL, nullptr);
+		if (pls_is_equal(id, PRISM_CHZZK_SPONSOR_SOURCE_ID)) {
+			PLSBasic::instance()->setChzzkSponsorSourceSetting(
+				source);
+		}
 
 		if (source) {
 			AddSourceData data{source, visible};
 
-			if (pls_is_equal(id, PRISM_CHAT_SOURCE_ID)) {
+			if (pls_is_equal(id, PRISM_CHATV2_SOURCE_ID)) {
 				data.centerShow();
 			} else if (pls_is_equal(id,
 						PRISM_SPECTRALIZER_SOURCE_ID)) {
@@ -351,7 +371,9 @@ bool AddNew(QWidget *parent, const char *id, const char *name,
 				   pls_is_equal(id, PRISM_TIMER_SOURCE_ID) ||
 				   pls_is_equal(id,
 						PRISM_VIEWER_COUNT_SOURCE_ID) ||
-				   pls_is_equal(id, PRISM_TEXT_TEMPLATE_ID)) {
+				   pls_is_equal(id, PRISM_TEXT_TEMPLATE_ID) ||
+				   pls_is_equal(
+					   id, PRISM_CHZZK_SPONSOR_SOURCE_ID)) {
 				//PRISM/WuLongyue/20201222/#6214/For PRISM Mobile source: Use center point to rotate
 				/** Compatible with other source
 				* Either here or obs-scene.cpp::obs_scene_add_internal
@@ -402,8 +424,7 @@ void OBSBasicSourceSelect::on_buttonBox_accepted()
 		const char *scene_name =
 			obs_source_get_name(main->GetCurrentSceneSource());
 
-		auto undo = [scene_name, main](const std::string &data) {
-			UNUSED_PARAMETER(data);
+		auto undo = [scene_name, main](const std::string &) {
 			obs_source_t *scene_source =
 				obs_get_source_by_name(scene_name);
 			main->SetCurrentScene(scene_source, true);
@@ -411,29 +432,31 @@ void OBSBasicSourceSelect::on_buttonBox_accepted()
 
 			obs_scene_t *scene = obs_get_scene_by_name(scene_name);
 			OBSSceneItem item;
-			auto cb = [](obs_scene_t *scene,
-				     obs_sceneitem_t *sceneitem, void *data) {
-				UNUSED_PARAMETER(scene);
+			auto cb = [](obs_scene_t *, obs_sceneitem_t *sceneitem,
+				     void *data) {
 				OBSSceneItem &last =
 					*reinterpret_cast<OBSSceneItem *>(data);
 				last = sceneitem;
 				return true;
 			};
 			obs_scene_enum_items(scene, cb, &item);
-
+			if(auto verItem = PLSSceneitemMapMgrInstance
+					    ->getVerticalSceneitem(item);verItem) {
+				PLSSceneitemMapMgrInstance->removeItem(item);
+			}
 			obs_sceneitem_remove(item);
 			obs_scene_release(scene);
 		};
 
 		auto redo = [scene_name, main, source_name,
-			     visible](const std::string &data) {
-			UNUSED_PARAMETER(data);
+			     visible](const std::string &) {
 			obs_source_t *scene_source =
 				obs_get_source_by_name(scene_name);
 			main->SetCurrentScene(scene_source, true);
 			obs_source_release(scene_source);
 			AddExisting(QT_TO_UTF8(source_name), visible, false,
 				    nullptr, nullptr, nullptr, nullptr);
+			PLSSceneitemMapMgrInstance->switchToDualOutputMode();
 		};
 
 		undo_s.add_action(QTStr("Undo.Add").arg(source_name), undo,
@@ -489,6 +512,7 @@ void OBSBasicSourceSelect::on_buttonBox_accepted()
 					main->GetCurrentScene(), source);
 			obs_sceneitem_set_id(item, (int64_t)obs_data_get_int(
 							   dat, "item_id"));
+			PLSSceneitemMapMgrInstance->switchToDualOutputMode();
 		};
 		undo_s.add_action(QTStr("Undo.Add").arg(ui->sourceName->text()),
 				  undo, redo,
@@ -508,6 +532,8 @@ static inline const char *GetSourceDisplayName(const char *id)
 {
 	if (strcmp(id, "scene") == 0)
 		return Str("Basic.Scene");
+	else if (strcmp(id, "group") == 0)
+		return Str("Group");
 	const char *v_id = obs_get_latest_input_type_id(id);
 	return pls_source_get_display_name(v_id);
 }
@@ -548,6 +574,7 @@ OBSBasicSourceSelect::OBSBasicSourceSelect(OBSBasic *parent, const char *id_,
 			if (checked) {
 				previousIndex = ui->sourceList->currentIndex();
 				ui->sourceList->setCurrentIndex(QModelIndex());
+				ui->sourceList->setEnabled(false);
 				ui->sourceName->setFocus();
 			}
 		});
@@ -558,6 +585,7 @@ OBSBasicSourceSelect::OBSBasicSourceSelect(OBSBasic *parent, const char *id_,
 					 ui->sourceList->setCurrentIndex(
 						 previousIndex);
 					 ui->sourceList->setFocus();
+					 ui->sourceList->setEnabled(true);
 				 }
 			 });
 
@@ -580,6 +608,25 @@ OBSBasicSourceSelect::OBSBasicSourceSelect(OBSBasic *parent, const char *id_,
 	ui->sourceName->selectAll();
 
 	installEventFilter(CreateShortcutFilter(parent));
+	connect(ui->createNew, &PLSRadioButton::pressed, [&]() {
+		QPushButton *button =
+			ui->buttonBox->button(QDialogButtonBox::Ok);
+		if (!button->isEnabled())
+			button->setEnabled(true);
+	});
+	connect(ui->selectExisting, &PLSRadioButton::pressed, [&]() {
+		QPushButton *button =
+			ui->buttonBox->button(QDialogButtonBox::Ok);
+		bool enabled = ui->sourceList->selectedItems().size() != 0;
+		if (button->isEnabled() != enabled)
+			button->setEnabled(enabled);
+	});
+	connect(ui->sourceList, &QListWidget::itemSelectionChanged, [&]() {
+		QPushButton *button =
+			ui->buttonBox->button(QDialogButtonBox::Ok);
+		if (!button->isEnabled())
+			button->setEnabled(true);
+	});
 
 	if (strcmp(id_, "scene") == 0) {
 		OBSBasic *main =
@@ -590,6 +637,7 @@ OBSBasicSourceSelect::OBSBasicSourceSelect(OBSBasic *parent, const char *id_,
 		ui->createNew->setChecked(false);
 		ui->createNew->setEnabled(false);
 		ui->sourceName->setEnabled(false);
+		ui->buttonBox->button(QDialogButtonBox::Ok)->setEnabled(false);
 		ui->sourceName->setSelection(0, 0);
 
 		SceneDisplayVector data =
@@ -623,4 +671,6 @@ void OBSBasicSourceSelect::SourcePaste(SourceCopyInfo &info, bool dup)
 
 	AddExisting(source, info.visible, dup, &info.transform, &info.crop,
 		    &info.blend_method, &info.blend_mode);
+
+	PLSSceneitemMapMgrInstance->switchToDualOutputMode();
 }

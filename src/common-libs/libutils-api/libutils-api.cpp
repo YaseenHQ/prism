@@ -36,6 +36,12 @@
 #include <qsemaphore.h>
 #include <qdebug.h>
 #include <QGuiApplication>
+#include <qhostinfo.h>
+#include <qhostaddress.h>
+#include <regex>
+#include <QSharedMemory>
+#include <QBuffer>
+#include <QStack>
 
 #include "network-state.h"
 #include "libutils-api-log.h"
@@ -51,6 +57,7 @@
 #if defined(Q_OS_WIN)
 #pragma comment(lib, "Shlwapi.lib")
 #endif
+#include "pls-shared-values.h"
 
 namespace pls {
 bool network_state_start();
@@ -66,24 +73,31 @@ struct LocalGlobalVars {
 	static int g_argc;
 	static char **g_argv;
 	static QStringList g_cmdline_args;
-	static std::optional<bool> g_prism_is_dev;
-	static std::atomic<bool> g_app_exiting;
+	static std::optional<uint64_t> g_prism_is_dev;
+	static std::optional<uint64_t> g_prism_save_local_log;
+	static std::atomic<uint64_t> g_app_exiting;
 	static qulonglong g_qobject_id;
 	static uint64_t g_prism_version;
 	static thread_local uint32_t g_last_error;
+	static QList<QPointer<QThread>> g_async_invoke_threads;
 };
 int LocalGlobalVars::g_argc = 0;
 char **LocalGlobalVars::g_argv = nullptr;
 QStringList LocalGlobalVars::g_cmdline_args;
-std::optional<bool> LocalGlobalVars::g_prism_is_dev = std::nullopt;
-std::atomic<bool> LocalGlobalVars::g_app_exiting = false;
+std::optional<uint64_t> LocalGlobalVars::g_prism_is_dev = std::nullopt;
+std::optional<uint64_t> LocalGlobalVars::g_prism_save_local_log = std::nullopt;
+std::atomic<uint64_t> LocalGlobalVars::g_app_exiting = 0;
 qulonglong LocalGlobalVars::g_qobject_id = 1;
 uint64_t LocalGlobalVars::g_prism_version = 0;
 thread_local uint32_t LocalGlobalVars::g_last_error = 0;
+QList<QPointer<QThread>> LocalGlobalVars::g_async_invoke_threads;
 
 class object_pool_t {
+	using getters = std::map<QByteArray, pls_getter_t>;
+	using setters = std::map<QByteArray, pls_setter_t>;
+	using objects = std::map<const QObject *, std::tuple<qulonglong, getters, setters>>;
 	mutable std::shared_mutex m_objects_mutex;
-	std::map<const QObject *, qulonglong> m_objects;
+	objects m_objects;
 
 public:
 	bool contains(const QObject *object) const
@@ -94,16 +108,62 @@ public:
 	qulonglong get_qobject_id(const QObject *object) const
 	{
 		std::shared_lock locker(m_objects_mutex);
-		if (auto iter = m_objects.find(object); iter != m_objects.end()) {
-			return iter->second;
-		}
+		if (auto iter = m_objects.find(object); iter != m_objects.end())
+			return std::get<0>(iter->second);
 		return 0;
+	}
+
+	template<typename Fn> static Fn get_gs(const std::map<QByteArray, Fn> &gs, const QByteArray &name)
+	{
+		if (auto iter = gs.find(name); iter != gs.end())
+			return iter->second;
+		return nullptr;
+	}
+	pls_getter_t get_getter(const QObject *object, const QByteArray &name)
+	{
+		std::shared_lock locker(m_objects_mutex);
+		if (auto iter = m_objects.find(object); iter != m_objects.end())
+			return get_gs(std::get<1>(iter->second), name);
+		return nullptr;
+	}
+	bool add_getter(const QObject *object, const QByteArray &name, const pls_getter_t &getter)
+	{
+		std::unique_lock locker(m_objects_mutex);
+		if (auto iter = m_objects.find(object); iter != m_objects.end())
+			return std::get<1>(iter->second).insert(getters::value_type(name, getter)).second;
+		return false;
+	}
+	void remove_getter(const QObject *object, const QByteArray &name)
+	{
+		std::unique_lock locker(m_objects_mutex);
+		if (auto iter = m_objects.find(object); iter != m_objects.end())
+			std::get<1>(iter->second).erase(name);
+	}
+	pls_setter_t get_setter(const QObject *object, const QByteArray &name)
+	{
+		std::shared_lock locker(m_objects_mutex);
+		if (auto iter = m_objects.find(object); iter != m_objects.end())
+			return get_gs(std::get<2>(iter->second), name);
+		return nullptr;
+	}
+	bool add_setter(const QObject *object, const QByteArray &name, const pls_setter_t &setter)
+	{
+		std::unique_lock locker(m_objects_mutex);
+		if (auto iter = m_objects.find(object); iter != m_objects.end())
+			return std::get<2>(iter->second).insert(setters::value_type(name, setter)).second;
+		return false;
+	}
+	void remove_setter(const QObject *object, const QByteArray &name)
+	{
+		std::unique_lock locker(m_objects_mutex);
+		if (auto iter = m_objects.find(object); iter != m_objects.end())
+			std::get<2>(iter->second).erase(name);
 	}
 	void add(QObject *object)
 	{
 		std::unique_lock locker(m_objects_mutex);
 		qulonglong object_id = LocalGlobalVars::g_qobject_id++;
-		pls_abort_assert(m_objects.insert(std::map<const QObject *, qulonglong>::value_type(object, object_id)).second);
+		pls_abort_assert(m_objects.insert(objects::value_type(object, std::make_tuple(object_id, getters(), setters()))).second);
 	}
 	void remove(const QObject *object)
 	{
@@ -158,6 +218,12 @@ public:
 };
 
 const hook_t hook_t::s_hook;
+
+void destroy_async_invoke_threads()
+{
+	while (!LocalGlobalVars::g_async_invoke_threads.isEmpty())
+		pls_delete_thread(LocalGlobalVars::g_async_invoke_threads.takeLast());
+}
 
 }
 
@@ -238,6 +304,11 @@ LIBUTILSAPI_API bool pls_mkdir(const QString &dir_path)
 	return pls_mkdir(QDir(dir_path));
 }
 
+LIBUTILSAPI_API bool pls_mkfiledir(const QString &file_path)
+{
+	return pls_mkdir(QFileInfo(file_path).dir());
+}
+
 LIBUTILSAPI_API QVariantHash pls_map_to_hash(const QMap<QString, QString> &map)
 {
 	QVariantHash hash;
@@ -252,60 +323,61 @@ LIBUTILSAPI_API QMap<QString, QString> pls_hash_to_map(const QVariantHash &hash)
 	return map;
 }
 
-LIBUTILSAPI_API QByteArray pls_read_data(const QString &file_path)
+LIBUTILSAPI_API QByteArray pls_read_data(const QString &file_path, QString *error)
 {
-	QByteArray data;
-	if (pls_read_data(data, file_path)) {
+	if (QByteArray data; pls_read_data(data, file_path, error)) {
 		return data;
 	}
 	return {};
 }
-LIBUTILSAPI_API bool pls_read_data(QByteArray &data, const QString &file_path)
+LIBUTILSAPI_API bool pls_read_data(QByteArray &data, const QString &file_path, QString *error)
 {
-	QFile file(file_path);
-	if (file.open(QFile::ReadOnly)) {
+	if (QFile file(file_path); file.open(QFile::ReadOnly)) {
 		data = file.readAll();
 		return true;
+	} else {
+		pls_set_value(error, file.errorString());
+		return false;
 	}
-	return false;
 }
-LIBUTILSAPI_API bool pls_write_data(const QString &file_path, const QByteArray &data)
+LIBUTILSAPI_API bool pls_write_data(const QString &file_path, const QByteArray &data, QString *error)
 {
-	pls_mkdir(QFileInfo(file_path).dir());
-
-	QFile file(file_path);
-	if (file.open(QFile::WriteOnly)) {
+	if (!pls_mkfiledir(file_path)) {
+		pls_set_value(error, QStringLiteral("create file directory failed"));
+		return false;
+	} else if (QFile file(file_path); file.open(QFile::WriteOnly)) {
 		file.write(data);
 		return true;
+	} else {
+		pls_set_value(error, file.errorString());
+		return false;
 	}
-	return false;
 }
-LIBUTILSAPI_API bool pls_read_cbor(QCborValue &cbor, const QString &file_path)
+LIBUTILSAPI_API bool pls_read_cbor(QCborValue &cbor, const QString &file_path, QString *error)
 {
 	QByteArray bytes;
-	if (!pls_read_data(bytes, file_path)) {
+	if (!pls_read_data(bytes, file_path, error)) {
 		return false;
 	}
 
-	QCborParserError error;
-	cbor = QCborValue::fromCbor(bytes, &error);
-	if (error.error != QCborError::NoError) {
+	QCborParserError cborError;
+	cbor = QCborValue::fromCbor(bytes, &cborError);
+	if (cborError.error == QCborError::NoError) {
+		return true;
+	} else {
+		pls_set_value(error, cborError.errorString());
 		return false;
 	}
-	return true;
 }
-LIBUTILSAPI_API bool pls_write_cbor(const QString &file_path, QCborValue &cbor)
+LIBUTILSAPI_API bool pls_write_cbor(const QString &file_path, QCborValue &cbor, QString *error)
 {
-	return pls_write_data(file_path, cbor.toCbor());
+	return pls_write_data(file_path, cbor.toCbor(), error);
 }
 LIBUTILSAPI_API QByteArray pls_remove_utf8_bom(const QByteArray &utf8)
 {
 	if (utf8.length() < 3) {
 		return utf8;
-	}
-
-	auto data = (const quint8 *)utf8.data();
-	if (data[0] == quint8(0xEF) && data[1] == quint8(0xBB) && data[2] == quint8(0xBF)) {
+	} else if (auto data = (const quint8 *)utf8.data(); data[0] == quint8(0xEF) && data[1] == quint8(0xBB) && data[2] == quint8(0xBF)) {
 		return utf8.mid(3);
 	}
 	return utf8;
@@ -405,131 +477,249 @@ LIBUTILSAPI_API std::optional<quint64> pls_cmdline_get_uint64_arg(const QStringL
 	return std::nullopt;
 }
 
-LIBUTILSAPI_API bool pls_read_json(QJsonDocument &doc, const QString &file_path)
+LIBUTILSAPI_API bool pls_read_json(QJsonDocument &doc, const QString &file_path, QString *error)
 {
-	QByteArray bytes;
-	if (!pls_read_data(bytes, file_path)) {
+	if (QByteArray bytes; !pls_read_data(bytes, file_path, error))
 		return false;
-	}
-
-	bytes = pls_remove_utf8_bom(bytes);
-
-	QJsonParseError error;
-	doc = QJsonDocument::fromJson(bytes, &error);
-	if (error.error != QJsonParseError::NoError) {
+	else if (!pls_parse_json(doc, bytes = pls_remove_utf8_bom(bytes), error))
 		return false;
-	}
 	return true;
 }
-LIBUTILSAPI_API bool pls_read_json(QJsonArray &array, const QString &file_path)
+LIBUTILSAPI_API bool pls_read_json(QJsonArray &array, const QString &file_path, QString *error)
 {
-	QJsonDocument doc;
-	if (!pls_read_json(doc, file_path)) {
+	if (QJsonDocument doc; !pls_read_json(doc, file_path, error)) {
+		return false;
+	} else if (doc.isArray()) {
+		array = doc.array();
+		return true;
+	} else {
+		pls_set_value(error, QStringLiteral("error format"));
 		return false;
 	}
-
-	if (!doc.isArray()) {
+}
+LIBUTILSAPI_API bool pls_read_json(QVariantList &list, const QString &file_path, QString *error)
+{
+	if (QJsonArray array; pls_read_json(array, file_path, error)) {
+		list = array.toVariantList();
+		return true;
+	}
+	return false;
+}
+LIBUTILSAPI_API bool pls_read_json(QJsonObject &object, const QString &file_path, QString *error)
+{
+	if (QJsonDocument doc; !pls_read_json(doc, file_path, error)) {
+		return false;
+	} else if (doc.isObject()) {
+		object = doc.object();
+		return true;
+	} else {
+		pls_set_value(error, QStringLiteral("error format"));
 		return false;
 	}
-
-	array = doc.array();
-	return true;
 }
-LIBUTILSAPI_API bool pls_read_json(QJsonObject &object, const QString &file_path)
+LIBUTILSAPI_API bool pls_read_json(QVariantMap &map, const QString &file_path, QString *error)
 {
-	QJsonDocument doc;
-	if (!pls_read_json(doc, file_path)) {
-		return false;
+	if (QJsonObject object; pls_read_json(object, file_path, error)) {
+		map = object.toVariantMap();
+		return true;
 	}
-
-	if (!doc.isObject()) {
-		return false;
+	return false;
+}
+LIBUTILSAPI_API bool pls_read_json(QVariantHash &hash, const QString &file_path, QString *error)
+{
+	if (QJsonObject object; pls_read_json(object, file_path, error)) {
+		hash = object.toVariantHash();
+		return true;
 	}
-
-	object = doc.object();
-	return true;
+	return false;
 }
 
-LIBUTILSAPI_API bool pls_write_json(const QString &file_path, const QJsonDocument &doc)
+LIBUTILSAPI_API bool pls_write_json(const QString &file_path, const QJsonDocument &doc, QString *error)
 {
-	return pls_write_data(file_path, doc.toJson());
+	return pls_write_data(file_path, doc.toJson(), error);
 }
-LIBUTILSAPI_API bool pls_write_json(const QString &file_path, const QJsonArray &array)
+LIBUTILSAPI_API bool pls_write_json(const QString &file_path, const QJsonArray &array, QString *error)
 {
-	return pls_write_json(file_path, QJsonDocument(array));
+	return pls_write_json(file_path, QJsonDocument(array), error);
 }
-LIBUTILSAPI_API bool pls_write_json(const QString &file_path, const QJsonObject &object)
+
+LIBUTILSAPI_API bool pls_write_json(const QString &file_path, const QVariantList &list, QString *error)
 {
-	return pls_write_json(file_path, QJsonDocument(object));
+	return pls_write_json(file_path, QJsonArray::fromVariantList(list), error);
 }
-LIBUTILSAPI_API bool pls_read_json_cbor(QJsonDocument &doc, const QString &file_path)
+LIBUTILSAPI_API bool pls_write_json(const QString &file_path, const QJsonObject &object, QString *error)
 {
-	QCborValue cbor;
-	if (!pls_read_cbor(cbor, file_path)) {
+	return pls_write_json(file_path, QJsonDocument(object), error);
+}
+LIBUTILSAPI_API bool pls_write_json(const QString &file_path, const QVariantMap &map, QString *error)
+{
+	return pls_write_json(file_path, QJsonObject::fromVariantMap(map), error);
+}
+LIBUTILSAPI_API bool pls_write_json(const QString &file_path, const QVariantHash &hash, QString *error)
+{
+	return pls_write_json(file_path, QJsonObject::fromVariantHash(hash), error);
+}
+LIBUTILSAPI_API bool pls_read_json_cbor(QJsonDocument &doc, const QString &file_path, QString *error)
+{
+	if (QCborValue cbor; !pls_read_cbor(cbor, file_path, error)) {
 		return false;
-	}
-
-	QJsonValue value = cbor.toJsonValue();
-	if (value.isObject()) {
+	} else if (QJsonValue value = cbor.toJsonValue(); value.isObject()) {
 		doc.setObject(value.toObject());
 		return true;
 	} else if (value.isArray()) {
 		doc.setArray(value.toArray());
 		return true;
 	} else {
+		pls_set_value(error, QStringLiteral("error format"));
 		return false;
 	}
 }
-LIBUTILSAPI_API bool pls_read_json_cbor(QJsonArray &array, const QString &file_path)
+LIBUTILSAPI_API bool pls_read_json_cbor(QJsonArray &array, const QString &file_path, QString *error)
 {
-	QCborValue cbor;
-	if (!pls_read_cbor(cbor, file_path)) {
+	if (QCborValue cbor; !pls_read_cbor(cbor, file_path, error)) {
+		return false;
+	} else if (QJsonValue value = cbor.toJsonValue(); value.isArray()) {
+		array = value.toArray();
+		return true;
+	} else {
+		pls_set_value(error, QStringLiteral("error format"));
 		return false;
 	}
-
-	QJsonValue value = cbor.toJsonValue();
-	if (!value.isArray()) {
-		return false;
-	}
-
-	array = value.toArray();
-	return true;
 }
-LIBUTILSAPI_API bool pls_read_json_cbor(QJsonObject &object, const QString &file_path)
+LIBUTILSAPI_API bool pls_read_json_cbor(QVariantList &list, const QString &file_path, QString *error)
 {
-	QCborValue cbor;
-	if (!pls_read_cbor(cbor, file_path)) {
-		return false;
+	if (QJsonArray array; pls_read_json_cbor(array, file_path, error)) {
+		list = array.toVariantList();
+		return true;
 	}
-
-	QJsonValue value = cbor.toJsonValue();
-	if (!value.isObject()) {
-		return false;
-	}
-
-	object = value.toObject();
-	return true;
+	return false;
 }
-LIBUTILSAPI_API bool pls_write_json_cbor(const QString &file_path, const QJsonDocument &doc)
+LIBUTILSAPI_API bool pls_read_json_cbor(QJsonObject &object, const QString &file_path, QString *error)
+{
+	if (QCborValue cbor; !pls_read_cbor(cbor, file_path, error)) {
+		return false;
+	} else if (QJsonValue value = cbor.toJsonValue(); value.isObject()) {
+		object = value.toObject();
+		return true;
+	} else {
+		pls_set_value(error, QStringLiteral("error format"));
+		return false;
+	}
+}
+LIBUTILSAPI_API bool pls_read_json_cbor(QVariantMap &map, const QString &file_path, QString *error)
+{
+	if (QJsonObject object; pls_read_json_cbor(object, file_path, error)) {
+		map = object.toVariantMap();
+		return true;
+	}
+	return false;
+}
+LIBUTILSAPI_API bool pls_read_json_cbor(QVariantHash &hash, const QString &file_path, QString *error)
+{
+	if (QJsonObject object; pls_read_json_cbor(object, file_path, error)) {
+		hash = object.toVariantHash();
+		return true;
+	}
+	return false;
+}
+LIBUTILSAPI_API bool pls_write_json_cbor(const QString &file_path, const QJsonDocument &doc, QString *error)
 {
 	if (doc.isObject()) {
-		return pls_write_json_cbor(file_path, doc.object());
+		return pls_write_json_cbor(file_path, doc.object(), error);
 	} else if (doc.isArray()) {
-		return pls_write_json_cbor(file_path, doc.array());
+		return pls_write_json_cbor(file_path, doc.array(), error);
 	} else {
+		pls_set_value(error, QStringLiteral("error format"));
 		return false;
 	}
 }
-LIBUTILSAPI_API bool pls_write_json_cbor(const QString &file_path, const QJsonArray &array)
+LIBUTILSAPI_API bool pls_write_json_cbor(const QString &file_path, const QJsonArray &array, QString *error)
 {
 	QCborValue cbor = QCborValue::fromJsonValue(array);
-	return pls_write_cbor(file_path, cbor);
+	return pls_write_cbor(file_path, cbor, error);
 }
-
-LIBUTILSAPI_API bool pls_write_json_cbor(const QString &file_path, const QJsonObject &object)
+LIBUTILSAPI_API bool pls_write_json_cbor(const QString &file_path, const QVariantList &list, QString *error)
+{
+	return pls_write_json_cbor(file_path, QJsonArray::fromVariantList(list), error);
+}
+LIBUTILSAPI_API bool pls_write_json_cbor(const QString &file_path, const QJsonObject &object, QString *error)
 {
 	QCborValue cbor = QCborValue::fromJsonValue(object);
-	return pls_write_cbor(file_path, cbor);
+	return pls_write_cbor(file_path, cbor, error);
+}
+LIBUTILSAPI_API bool pls_write_json_cbor(const QString &file_path, const QVariantMap &map, QString *error)
+{
+	return pls_write_json_cbor(file_path, QJsonObject::fromVariantMap(map), error);
+}
+LIBUTILSAPI_API bool pls_write_json_cbor(const QString &file_path, const QVariantHash &hash, QString *error)
+{
+	return pls_write_json_cbor(file_path, QJsonObject::fromVariantHash(hash), error);
+}
+
+LIBUTILSAPI_API bool pls_parse_json(QJsonDocument &doc, const QByteArray &json, QString *error)
+{
+	QJsonParseError jsonError;
+	doc = QJsonDocument::fromJson(json, &jsonError);
+	if (jsonError.error == QJsonParseError::NoError) {
+		return true;
+	} else {
+		pls_set_value(error, jsonError.errorString());
+		return false;
+	}
+}
+LIBUTILSAPI_API bool pls_parse_json(QJsonArray &array, const QByteArray &json, QString *error)
+{
+	if (QJsonDocument doc; !pls_parse_json(doc, json, error)) {
+		return false;
+	} else if (doc.isArray()) {
+		array = doc.array();
+		return true;
+	} else {
+		pls_set_value(error, QStringLiteral("error format"));
+		return false;
+	}
+}
+LIBUTILSAPI_API bool pls_parse_json(QVariantList &list, const QByteArray &json, QString *error)
+{
+	if (QJsonArray array; pls_parse_json(array, json, error)) {
+		list = array.toVariantList();
+		return true;
+	} else {
+		pls_set_value(error, QStringLiteral("error format"));
+		return false;
+	}
+}
+LIBUTILSAPI_API bool pls_parse_json(QJsonObject &object, const QByteArray &json, QString *error)
+{
+	if (QJsonDocument doc; !pls_parse_json(doc, json, error)) {
+		return false;
+	} else if (doc.isObject()) {
+		object = doc.object();
+		return true;
+	} else {
+		pls_set_value(error, QStringLiteral("error format"));
+		return false;
+	}
+}
+LIBUTILSAPI_API bool pls_parse_json(QVariantMap &map, const QByteArray &json, QString *error)
+{
+	if (QJsonObject object; pls_parse_json(object, json, error)) {
+		map = object.toVariantMap();
+		return true;
+	} else {
+		pls_set_value(error, QStringLiteral("error format"));
+		return false;
+	}
+}
+LIBUTILSAPI_API bool pls_parse_json(QVariantHash &hash, const QByteArray &json, QString *error)
+{
+	if (QJsonObject object; pls_parse_json(object, json, error)) {
+		hash = object.toVariantHash();
+		return true;
+	} else {
+		pls_set_value(error, QStringLiteral("error format"));
+		return false;
+	}
 }
 
 LIBUTILSAPI_API QStringList pls_to_string_list(const QJsonArray &array)
@@ -540,6 +730,10 @@ LIBUTILSAPI_API QStringList pls_to_string_list(const QJsonArray &array)
 	}
 	return string_list;
 }
+LIBUTILSAPI_API QVariantList pls_to_variant_list(const QJsonArray &array)
+{
+	return array.toVariantList();
+}
 LIBUTILSAPI_API QJsonArray pls_to_json_array(const QStringList &string_list)
 {
 	QJsonArray array;
@@ -547,6 +741,10 @@ LIBUTILSAPI_API QJsonArray pls_to_json_array(const QStringList &string_list)
 		array.append(s);
 	}
 	return array;
+}
+LIBUTILSAPI_API QJsonArray pls_to_json_array(const QVariantList &variant_list)
+{
+	return QJsonArray::fromVariantList(variant_list);
 }
 LIBUTILSAPI_API QString pls_to_string(const QJsonArray &array)
 {
@@ -564,14 +762,185 @@ LIBUTILSAPI_API QJsonObject pls_to_json_object(const QString &jsonObject)
 {
 	return QJsonDocument::fromJson(jsonObject.toUtf8()).object();
 }
-LIBUTILSAPI_API bool pls_save_file(const QString &path, const QByteArray &data)
+
+static bool is_same_type(const std::optional<QJsonValue> &attr, const std::optional<QJsonValue::Type> &type)
 {
-	QFile file(path);
-	if (!file.open(QIODevice::WriteOnly))
-		return false;
-	file.write(data);
-	file.close();
-	return true;
+	if ((!type) || (attr.value().type() == type.value()))
+		return true;
+	return false;
+}
+
+LIBUTILSAPI_API std::optional<QJsonValue> pls_find_attr(const QJsonObject &object, const QString &name, bool recursion, const std::optional<QJsonValue::Type> &type)
+{
+	if (auto attr = pls_get_attr(object, name); attr && is_same_type(attr, type))
+		return attr;
+	else if (!recursion)
+		return std::nullopt;
+
+	for (auto iter = object.begin(), end = object.end(); iter != end; ++iter) {
+		if (auto value = iter.value(); !value.isObject()) {
+			continue;
+		} else if (auto attr = pls_find_attr(value.toObject(), name, recursion, type); attr) {
+			return attr;
+		}
+	}
+	return std::nullopt;
+}
+LIBUTILSAPI_API std::optional<QJsonValue> pls_get_attr(const QJsonObject &object, const QString &name)
+{
+	if (object.isEmpty())
+		return std::nullopt;
+	else if (auto attr = object.value(name); !attr.isUndefined())
+		return attr;
+	return std::nullopt;
+}
+static std::optional<QJsonValue> get_attr(const QJsonObject &object, const QStringList &names, qsizetype from, qsizetype to)
+{
+	if (auto next = from + 1; next == to)
+		return pls_get_attr(object, names[from]);
+	else if (next > to)
+		return std::nullopt;
+	else if (auto val = pls_get_attr(object, names[from]); !val)
+		return std::nullopt;
+	else if (val.value().isObject())
+		return get_attr(val.value().toObject(), names, from + 1, to);
+	return std::nullopt;
+}
+LIBUTILSAPI_API std::optional<QJsonValue> pls_get_attr(const QJsonObject &object, const QStringList &names, qsizetype from, qsizetype n)
+{
+	if (object.isEmpty() || names.isEmpty() || (from < 0) || (n == 0))
+		return std::nullopt;
+	else if (auto size = names.size(); size > from)
+		return get_attr(object, names, from, from + ((n > 0) ? qMin(n, size - from) : (size - from)));
+	return std::nullopt;
+}
+
+LIBUTILSAPI_API QList<pls_attr_name_t> pls_to_attr_names(const QStringList &names, int index)
+{
+	QList<pls_attr_name_t> attr_names;
+	for (const auto &name : names)
+		attr_names.append(pls_attr_name_t(name, index));
+	return attr_names;
+}
+
+LIBUTILSAPI_API std::optional<QJsonValue> pls_get_attr(const QJsonValue &json, const pls_attr_name_t &name)
+{
+	if (auto attrs = pls_get_attrs(json, name); !attrs.isEmpty())
+		return attrs.first();
+	return std::nullopt;
+}
+static QList<QJsonValue> get_attr(const QJsonObject &object, const pls_attr_name_t &name)
+{
+	if (object.isEmpty())
+		return {};
+	else if (auto attr = object.value(name.m_name); !attr.isUndefined())
+		return {attr};
+	return {};
+}
+static QList<QJsonValue> get_attr(const QJsonArray &array, const pls_attr_name_t &name)
+{
+	if (array.isEmpty() || (name.m_name != QStringLiteral("[]"))) {
+		return {};
+	} else if (name.m_index == pls_attr_name_t::First) {
+		return {array.first()};
+	} else if (name.m_index == pls_attr_name_t::Last) {
+		return {array.last()};
+	} else if (name.m_index == pls_attr_name_t::All) {
+		QList<QJsonValue> attrs;
+		for (auto i : array)
+			attrs.append(i);
+		return attrs;
+	} else if ((name.m_index > 0) && (name.m_index < array.size())) {
+		return {array[name.m_index]};
+	}
+	return {};
+}
+LIBUTILSAPI_API QList<QJsonValue> pls_get_attrs(const QJsonValue &json, const pls_attr_name_t &name)
+{
+	if (json.isObject())
+		return get_attr(json.toObject(), name);
+	else if (json.isArray())
+		return get_attr(json.toArray(), name);
+	return {};
+}
+LIBUTILSAPI_API std::optional<QJsonValue> pls_get_attr(const QJsonValue &json, const QList<pls_attr_name_t> &names, qsizetype from, qsizetype n)
+{
+	if (auto attrs = pls_get_attrs(json, names, from, n); !attrs.isEmpty())
+		return attrs.first();
+	return std::nullopt;
+}
+static void get_attrs(QList<QJsonValue> &attrs, const QJsonValue &json, const QList<pls_attr_name_t> &names, qsizetype from, qsizetype to)
+{
+	if (json.isNull() || json.isUndefined())
+		return;
+	else if (auto next = from + 1; next == to) {
+		attrs.append(pls_get_attrs(json, names[from]));
+	} else if (next < to) {
+		for (auto attr : pls_get_attrs(json, names[from]))
+			get_attrs(attrs, attr, names, from + 1, to);
+	}
+}
+LIBUTILSAPI_API QList<QJsonValue> pls_get_attrs(const QJsonValue &json, const QList<pls_attr_name_t> &names, qsizetype from, qsizetype n)
+{
+	if (json.isNull() || json.isUndefined() || names.isEmpty() || (from < 0) || (n == 0))
+		return {};
+	else if (auto size = names.size(); from < size) {
+		QList<QJsonValue> attrs;
+		get_attrs(attrs, json, names, from, from + ((n > 0) ? qMin(n, size - from) : (size - from)));
+		return attrs;
+	}
+	return {};
+}
+
+template<typename Container>
+static auto get_attr(const Container &attrs, const QStringList &names, qsizetype from, qsizetype to)
+	-> std::enable_if_t<std::is_same_v<Container, QVariantMap> || std::is_same_v<Container, QVariantHash>, std::optional<QVariant>>
+{
+	if (auto next = from + 1; next == to)
+		return pls_get_attr(attrs, names[from]);
+	else if (next > to)
+		return std::nullopt;
+
+	auto val = pls_get_attr(attrs, names[from]);
+	if (!val)
+		return std::nullopt;
+
+	switch (val.value().typeId()) {
+	case QMetaType::QVariantMap:
+		return get_attr(val.value().toMap(), names, from + 1, to);
+	case QMetaType::QVariantHash:
+		return get_attr(val.value().toHash(), names, from + 1, to);
+	default:
+		return std::nullopt;
+	}
+}
+LIBUTILSAPI_API std::optional<QVariant> pls_get_attr(const QVariantHash &attrs, const QString &name)
+{
+	if (auto iter = attrs.find(name); iter != attrs.end())
+		return iter.value();
+	return std::nullopt;
+}
+LIBUTILSAPI_API std::optional<QVariant> pls_get_attr(const QVariantMap &attrs, const QString &name)
+{
+	if (auto iter = attrs.find(name); iter != attrs.end())
+		return iter.value();
+	return std::nullopt;
+}
+LIBUTILSAPI_API std::optional<QVariant> pls_get_attr(const QVariantHash &attrs, const QStringList &names, qsizetype from, qsizetype n)
+{
+	if (attrs.isEmpty() || names.isEmpty() || (from < 0) || (n == 0))
+		return std::nullopt;
+	else if (auto size = names.size(); size > from)
+		return get_attr(attrs, names, from, from + ((n > 0) ? qMin(n, size - from) : (size - from)));
+	return std::nullopt;
+}
+LIBUTILSAPI_API std::optional<QVariant> pls_get_attr(const QVariantMap &attrs, const QStringList &names, qsizetype from, qsizetype n)
+{
+	if (attrs.isEmpty() || names.isEmpty() || (from < 0) || (n == 0))
+		return std::nullopt;
+	else if (auto size = names.size(); size > from)
+		return get_attr(attrs, names, from, from + ((n > 0) ? qMin(n, size - from) : (size - from)));
+	return std::nullopt;
 }
 
 LIBUTILSAPI_API QString pls_get_app_dir()
@@ -710,38 +1079,203 @@ LIBUTILSAPI_API QString pls_get_path_file_name(const QString &path)
 {
 	if (path.isEmpty()) {
 		return {};
-	} else if (int off1 = path.lastIndexOf('/'); off1 >= 0) {
+	} else if (auto off1 = path.lastIndexOf('/'); off1 >= 0) {
 		return path.mid(off1 + 1);
-	} else if (int off2 = path.lastIndexOf('\\'); off2 >= 0) {
+	} else if (auto off2 = path.lastIndexOf('\\'); off2 >= 0) {
 		return path.mid(off2 + 1);
 	}
 	return path;
 }
 
+LIBUTILSAPI_API QString pls_get_path_file_suffix(const QString &path)
+{
+	if (auto file_name = pls_get_path_file_name(path); file_name.isEmpty()) {
+		return {};
+	} else if (auto off = file_name.lastIndexOf('.'); off >= 0) {
+		return file_name.mid(off);
+	}
+	return {};
+}
+
+static bool enum_dir(const QString &dir, const std::function<bool(const QString &reldir, const QFileInfo &fi)> &result, const std::function<bool(const QString &reldir, const QFileInfo &fi)> &filter,
+		     bool recursion, QDir::Filters filters, QDir::SortFlags sort, const QString &reldir = QString())
+{
+	for (const auto &fi : QDir(dir).entryInfoList(filters, sort)) {
+		if (pls_invoke_safe(false, filter, reldir, fi))
+			continue;
+		else if ((!pls_invoke_safe(result, reldir, fi)) ||
+			 (recursion && fi.isDir() && !enum_dir(fi.filePath(), result, filter, recursion, filters, sort, reldir.isEmpty() ? fi.fileName() : (reldir + '/' + fi.fileName()))))
+			return false;
+	}
+	return true;
+}
+LIBUTILSAPI_API bool pls_enum_dir(const QString &dir, const std::function<bool(const QString &reldir, const QFileInfo &fi)> &result,
+				  const std::function<bool(const QString &reldir, const QFileInfo &fi)> &filter, bool recursion, QDir::Filters filters, QDir::SortFlags sort)
+{
+	return enum_dir(dir, result, filter, recursion, filters, sort);
+}
+LIBUTILSAPI_API QStringList pls_enum_dirs(const QString &dir, const std::function<bool(const QString &reldir, const QString &name)> &filter, bool recursion, bool relative_dir)
+{
+	QStringList dirs;
+	pls_enum_dir(
+		dir,
+		[&dirs, relative_dir](const QString &reldir, const QFileInfo &fi) {
+			if (!fi.isDir())
+				return true;
+			else if (!relative_dir)
+				dirs.append(fi.filePath());
+			else if (!reldir.isEmpty())
+				dirs.append(reldir + '/' + fi.fileName());
+			else
+				dirs.append(fi.fileName());
+			return true;
+		},
+		[filter](const QString &reldir, const QFileInfo &fi) {
+			if (fi.isFile() && pls_invoke_safe(false, filter, reldir, fi.fileName()))
+				return true;
+			return false;
+		},
+		recursion,                         //
+		QDir::Dirs | QDir::NoDotAndDotDot, //
+		QDir::Name);
+	return dirs;
+}
+LIBUTILSAPI_API QStringList pls_enum_files(const QString &dir, const std::function<bool(const QString &reldir, const QString &name)> &filter, bool recursion, bool relative_dir)
+{
+	QStringList files;
+	pls_enum_dir(
+		dir,
+		[&files, relative_dir](const QString &reldir, const QFileInfo &fi) {
+			if (!fi.isFile())
+				return true;
+			else if (!relative_dir)
+				files.append(fi.filePath());
+			else if (!reldir.isEmpty())
+				files.append(reldir + '/' + fi.fileName());
+			else
+				files.append(fi.filePath());
+			return true;
+		},
+		[filter](const QString &reldir, const QFileInfo &fi) {
+			if (fi.isFile() && pls_invoke_safe(false, filter, reldir, fi.fileName()))
+				return true;
+			return false;
+		},
+		recursion,                                                                     //
+		recursion ? (QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot) : (QDir::Files), //
+		QDir::Name | QDir::DirsLast);
+	return files;
+}
+
+static std::optional<QString> find_subdir_contains_spec_file(const QFileInfo &fi, const QString &file_name, Qt::CaseSensitivity cs)
+{
+	if (fi.isDir()) {
+		return pls_find_subdir_contains_spec_file(fi.absoluteFilePath(), file_name, cs);
+	} else if (!fi.fileName().compare(file_name, cs)) {
+		return fi.absolutePath();
+	} else {
+		return std::nullopt;
+	}
+}
+LIBUTILSAPI_API std::optional<QString> pls_find_subdir_contains_spec_file(const QString &dir, const QString &file_name, Qt::CaseSensitivity cs)
+{
+	for (const auto &fi : QDir(dir).entryInfoList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot, QDir::DirsLast)) {
+		if (auto subdir = find_subdir_contains_spec_file(fi, file_name, cs); subdir) {
+			return subdir;
+		}
+	}
+	return std::nullopt;
+}
+
+static std::optional<QString> find_subdir_contains_spec_filename(const QFileInfo &fi, const QString &file_name, Qt::CaseSensitivity cs)
+{
+	if (fi.isDir()) {
+		return pls_find_subdir_contains_spec_filename(fi.absoluteFilePath(), file_name, cs);
+	} else if (fi.fileName().contains(file_name, cs)) {
+		return fi.filePath();
+	} else {
+		return std::nullopt;
+	}
+}
+LIBUTILSAPI_API std::optional<QString> pls_find_subdir_contains_spec_filename(const QString &dir, const QString &file_name, Qt::CaseSensitivity cs)
+{
+	for (const auto &fi : QDir(dir).entryInfoList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot, QDir::DirsLast)) {
+		if (auto subdir = find_subdir_contains_spec_filename(fi, file_name, cs); subdir) {
+			return subdir;
+		}
+	}
+	return std::nullopt;
+}
+
 LIBUTILSAPI_API bool pls_remove_file(const QString &path, QString *error)
 {
-	QFile file(path);
-	if ((!file.exists()) || file.remove()) {
+	if (QFile file(path); (!file.exists()) || file.remove()) {
 		return true;
-	} else if (error) {
-		*error = file.errorString();
+	} else {
+		pls_set_value(error, file.errorString());
+		return false;
 	}
-	return false;
+}
+
+LIBUTILSAPI_API bool pls_remove_dir(const QString &path, QString *error)
+{
+	if (QDir dir(path); (!dir.exists()) || dir.removeRecursively()) {
+		return true;
+	} else {
+		return false;
+	}
 }
 
 LIBUTILSAPI_API bool pls_rename_file(const QString &old_file, const QString &new_file, QString *error)
 {
 	if (!pls_remove_file(new_file, error)) {
 		return false;
-	}
-
-	QFile file(old_file);
-	if (file.rename(new_file)) {
+	} else if (QFile file(old_file); file.rename(new_file)) {
 		return true;
-	} else if (error) {
-		*error = file.errorString();
+	} else {
+		pls_set_value(error, file.errorString());
+		return false;
 	}
-	return false;
+}
+
+LIBUTILSAPI_API bool pls_copy_file(const QString &src_file, const QString &dest_file, QString *error)
+{
+	if (QFile src(src_file); !src.exists()) {
+		pls_set_value(error, "source file does not exist");
+		return false;
+	} else if (!pls_remove_file(dest_file, error)) {
+		return false;
+	} else if (!pls_mkfiledir(dest_file)) {
+		pls_set_value(error, "create destination file directory failed");
+		return false;
+	} else if (!src.copy(dest_file)) {
+		pls_set_value(error, src.errorString());
+		return false;
+	}
+	return true;
+}
+static bool copy_dir(const QFileInfo &fi, const QDir &dest, QString *error)
+{
+	return pls_copy_dir(fi.filePath(), dest.filePath(fi.fileName()), error);
+}
+static bool copy_file(const QFileInfo &fi, const QDir &dest, QString *error)
+{
+	return pls_copy_file(fi.filePath(), dest.filePath(fi.fileName()), error);
+}
+LIBUTILSAPI_API bool pls_copy_dir(const QString &src_dir, const QString &dest_dir, QString *error)
+{
+	if (QDir src(src_dir); !src.exists()) {
+		pls_set_value(error, "source directory does not exist");
+		return false;
+	} else if (QDir dest(dest_dir); !pls_mkdir(dest)) {
+		pls_set_value(error, "create destination directory failed");
+		return false;
+	} else {
+		for (const auto &fi : src.entryInfoList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot, QDir::Name | QDir::DirsLast))
+			if (auto dir = fi.isDir(); (dir && !copy_dir(fi, dest, error)) || (!dir && !copy_file(fi, dest, error)))
+				return false;
+		return true;
+	}
 }
 
 LIBUTILSAPI_API QString pls_get_prism_subpath(const QString &subpath, bool creatIfNotExist)
@@ -824,7 +1358,7 @@ LIBUTILSAPI_API pls_process_t *pls_process_create(const QString &program, const 
 	}
 
 	auto app = pls_add_quotes(program).toStdWString();
-	auto args = pls_map(pls_filter(pls_unique(arguments), pls_is_not_empty<QString>), pls_add_quotes).join(' ').toStdWString();
+	auto args = pls_map<QList>(pls_filter(pls_unique(arguments), pls_is_not_empty<QString>), pls_add_quotes).join(' ').toStdWString();
 	auto command = app + L' ' + args;
 
 	PROCESS_INFORMATION pi;
@@ -1092,8 +1626,6 @@ class pls_shm_t {
 
 	QString m_name;
 	QSharedMemory m_sm;
-	QSystemSemaphore m_sem_s; // for send
-	QSystemSemaphore m_sem_r; // for receive
 	int m_max_data_size;
 	bool m_for_send;
 	state_t m_state = state_t::Offline;
@@ -1102,8 +1634,6 @@ public:
 	pls_shm_t(const QString &name, int max_data_size, bool for_send) //
 		: m_name(name),                                          //
 		  m_sm(QStringLiteral("pls_shm_sm_") + name),
-		  m_sem_s(QStringLiteral("pls_shm_sem_s_") + name, 1),
-		  m_sem_r(QStringLiteral("pls_shm_sem_r_") + name),
 		  m_max_data_size(max_data_size),
 		  m_for_send(for_send)
 	{
@@ -1116,6 +1646,8 @@ public:
 	bool is_for_receive() const { return !m_for_send; }
 
 	bool is_online() const { return m_state == state_t::Online; }
+	bool is_sender_online() const { return is_online() && shm_header()->sender_state == state_t::Online; }
+	bool is_receiver_online() const { return is_online() && shm_header()->receiver_state == state_t::Online; }
 
 	char *shm_memory() const { return (char *)m_sm.data(); }
 	shm_header_t *shm_header() const { return (shm_header_t *)shm_memory(); }
@@ -1191,13 +1723,11 @@ public:
 				sh->receiver_state = state_t::Offline;
 			}
 		}
-		m_sem_s.release();
-		m_sem_r.release();
 	}
 
 	void send_msg(const pls_shm_msg_destroy_cb_t &msg_destroy_cb, const pls_shm_get_msg_cb_t &get_msg_cb, const pls_shm_result_cb_t &result_cb)
 	{
-		if (!is_for_send() || !is_online() || !m_sm.isAttached() || !m_sem_s.acquire()) {
+		if (!is_for_send() || !is_online() || !m_sm.isAttached()) {
 			pls_invoke_safe(result_cb, -1);
 			return;
 		}
@@ -1227,13 +1757,11 @@ public:
 			m_sm.unlock();
 		}
 
-		m_sem_r.release();
-
 		pls_invoke_safe(result_cb, count);
 	}
 	void receive_msg(const std::function<void(pls_shm_msg_t *msg)> &proc_msg_cb, const pls_shm_result_cb_t &result_cb)
 	{
-		if (!is_for_receive() || !is_online() || !m_sm.isAttached() || !m_sem_r.acquire()) {
+		if (!is_for_receive() || !is_online() || !m_sm.isAttached()) {
 			pls_invoke_safe(result_cb, -1);
 			return;
 		}
@@ -1260,11 +1788,8 @@ public:
 			}
 
 			sh->data_length = 0;
-
 			m_sm.unlock();
 		}
-
-		m_sem_s.release();
 
 		pls_invoke_safe(result_cb, count);
 	}
@@ -1317,6 +1842,14 @@ LIBUTILSAPI_API int pls_shm_get_max_data_size(pls_shm_t *shm)
 LIBUTILSAPI_API bool pls_shm_is_online(pls_shm_t *shm)
 {
 	return shm && shm->is_online();
+}
+LIBUTILSAPI_API bool pls_shm_is_sender_online(pls_shm_t *shm)
+{
+	return shm && shm->is_sender_online();
+}
+LIBUTILSAPI_API bool pls_shm_is_receiver_online(pls_shm_t *shm)
+{
+	return shm && shm->is_receiver_online();
 }
 
 LIBUTILSAPI_API void pls_get_current_datetime(pls_datetime_t &datetime)
@@ -1391,6 +1924,7 @@ LIBUTILSAPI_API void pls_qapp_deconstruct()
 {
 	pls::network_state_stop();
 	g_hook.call_qapp_cbs_r(g_hook.m_qapp_deconstruct_cbs);
+	destroy_async_invoke_threads();
 }
 
 LIBUTILSAPI_API bool pls_is_main_thread(const QThread *thread)
@@ -1410,14 +1944,12 @@ LIBUTILSAPI_API QString pls_gen_uuid()
 	return QUuid::createUuid().toString(QUuid::Id128);
 }
 #if defined(Q_OS_MACOS)
-static bool projectIsDebugged()
+static bool projectIsDebugged(int pid)
 {
-	static bool isDebugged = false;
-	static bool isGot = false;
-	if (isGot) {
-		return isDebugged;
+	static QMap<int, bool> isGotMap;
+	if (isGotMap.contains(pid)) {
+		return isGotMap[pid];
 	}
-	isGot = true;
 
 	int junk;
 	int mib[4];
@@ -1429,23 +1961,23 @@ static bool projectIsDebugged()
 	mib[0] = CTL_KERN;
 	mib[1] = KERN_PROC;
 	mib[2] = KERN_PROC_PID;
-	mib[3] = getpid();
+	mib[3] = (pid == -1) ? getpid() : pid;
 
 	size = sizeof(info);
 	junk = sysctl(mib, sizeof(mib) / sizeof(*mib), &info, &size, NULL, 0);
 	assert(junk == 0);
 
-	isDebugged = ((info.kp_proc.p_flag & P_TRACED) != 0);
-	return isDebugged;
+	isGotMap[pid] = ((info.kp_proc.p_flag & P_TRACED) != 0);
+	return isGotMap[pid];
 }
 #endif
 
-LIBUTILSAPI_API bool pls_is_debugger_present()
+LIBUTILSAPI_API bool pls_is_debugger_present(int pid)
 {
 #if defined(Q_OS_WIN)
 	return IsDebuggerPresent();
 #elif defined(Q_OS_MACOS)
-	return projectIsDebugged();
+	return projectIsDebugged(pid);
 #endif
 }
 
@@ -1509,6 +2041,20 @@ LIBUTILSAPI_API void pls_async_invoke(QObject *object, const char *fn)
 {
 	QMetaObject::invokeMethod(object, fn, Qt::QueuedConnection);
 }
+struct async_invoke_t : public QThread {
+	std::function<void()> m_fn;
+	async_invoke_t(const std::function<void()> &fn) : m_fn(fn) { LocalGlobalVars::g_async_invoke_threads.append(this); }
+	~async_invoke_t() { LocalGlobalVars::g_async_invoke_threads.removeOne(this); }
+	void run() override { pls_invoke_safe(m_fn); }
+};
+LIBUTILSAPI_API void pls_async_invoke(std::function<void()> &&fn)
+{
+	pls_async_call_mt([fn = std::move(fn)]() {
+		QPointer<QThread> thread = pls_new<async_invoke_t>(fn);
+		QObject::connect(thread.get(), &QThread::finished, qApp, [thread]() { pls_delete_thread(thread); });
+		thread->start();
+	});
+}
 
 LIBUTILSAPI_API bool pls_prism_is_dev()
 {
@@ -1517,13 +2063,39 @@ LIBUTILSAPI_API bool pls_prism_is_dev()
 		if (!LocalGlobalVars::g_prism_is_dev.has_value()) {
 #if defined(Q_OS_WIN)
 			QSettings setting("NAVER Corporation", "Prism Live Studio");
-			LocalGlobalVars::g_prism_is_dev = setting.value("DevServer", false).toBool();
+			LocalGlobalVars::g_prism_is_dev = setting.value("DevServer", false).toBool() ? 1 : 0;
 #elif defined(Q_OS_MACOS)
-			LocalGlobalVars::g_prism_is_dev = pls_libutil_api_mac::pls_is_dev_environment();
+			LocalGlobalVars::g_prism_is_dev = pls_libutil_api_mac::pls_is_dev_environment() ? 1 : 0;
 #endif
 		}
 	}
-	return LocalGlobalVars::g_prism_is_dev.value();
+	return LocalGlobalVars::g_prism_is_dev.value() == 1;
+}
+
+LIBUTILSAPI_API bool pls_prism_save_local_log()
+{
+	if (!LocalGlobalVars::g_prism_save_local_log.has_value()) {
+		std::lock_guard guard(pls_global_mutex());
+		if (!LocalGlobalVars::g_prism_save_local_log.has_value()) {
+#if defined(Q_OS_WIN)
+			QSettings setting("NAVER Corporation", "Prism Live Studio");
+			LocalGlobalVars::g_prism_save_local_log = setting.value("LocalLog", false).toBool() ? 1 : 0;
+#elif defined(Q_OS_MACOS)
+			LocalGlobalVars::g_prism_save_local_log = pls_libutil_api_mac::pls_save_local_log() ? 1 : 0;
+#endif
+		}
+	}
+	return LocalGlobalVars::g_prism_save_local_log.value() == 1;
+}
+
+LIBUTILSAPI_API QVariant pls_prism_get_qsetting_value(QString key, QVariant defaultVal)
+{
+#if defined(Q_OS_WIN)
+	QSettings setting = QSettings("NAVER Corporation", "Prism Live Studio");
+#elif defined(Q_OS_MACOS)
+	QSettings setting = QSettings("prismlive", "prismlivestudio");
+#endif
+	return setting.value(key, defaultVal);
 }
 
 static QMap<int, QPair<QString, QString>> getLocaleName()
@@ -1716,11 +2288,15 @@ LIBUTILSAPI_API QList<QHostAddress> pls_get_valid_hosts()
 	return validAddresses;
 }
 
+LIBUTILSAPI_API const char *pls_bool_2_string(bool b)
+{
+	return b ? "true" : "false";
+}
+
 LIBUTILSAPI_API bool pls_show_in_graphical_shell(const QString &pathIn)
 {
 	const QFileInfo fileInfo(pathIn);
 
-#if _WIN32
 	if (!QFile(pathIn).exists()) {
 		QFileInfo fi(pathIn);
 		auto path = fi.absolutePath();
@@ -1737,6 +2313,7 @@ LIBUTILSAPI_API bool pls_show_in_graphical_shell(const QString &pathIn)
 		file.close();
 	}
 
+#if _WIN32
 	QString cmd = "explorer.exe";
 	QStringList param;
 	param += QLatin1String("/select,");
@@ -1764,6 +2341,11 @@ LIBUTILSAPI_API bool pls_unZipFile(const QString &dstDirPath, const QString &src
 	return pls_libutil_api_mac::unZip(dstDirPath, srcFilePath);
 }
 
+LIBUTILSAPI_API bool pls_zipFile(const QString &destZipPath, const QString &sourceDirName, const QString &sourceFolderPath)
+{
+	return pls_libutil_api_mac::zip(destZipPath, sourceDirName, sourceFolderPath);
+}
+
 LIBUTILSAPI_API bool pls_copy_file_with_error_code(const QString &fileName, const QString &newName, bool overwrite, int &errorCode)
 {
 	return pls_libutil_api_mac::pls_copy_file(fileName, newName, overwrite, errorCode);
@@ -1779,14 +2361,14 @@ LIBUTILSAPI_API bool pls_file_is_existed(const QString &filePath)
 	return pls_libutil_api_mac::pls_file_is_existed(filePath);
 }
 
-LIBUTILSAPI_API bool pls_install_mac_package(const QString &unzipFolderPath, const QString &destBundlePath)
+LIBUTILSAPI_API bool pls_install_mac_package(const QString &unzipFolderPath, const QString &destBundlePath, const std::string &prismSession, const std::string &prismGcc, const char *version)
 {
-	return pls_libutil_api_mac::install_mac_package(unzipFolderPath, destBundlePath);
+	return pls_libutil_api_mac::install_mac_package(unzipFolderPath, destBundlePath, prismSession, prismGcc, version);
 }
 
-LIBUTILSAPI_API bool pls_restart_mac_app(const char *restartType)
+LIBUTILSAPI_API bool pls_restart_mac_app(const QStringList &arguments)
 {
-	return pls_libutil_api_mac::pls_restart_mac_app(restartType);
+	return pls_libutil_api_mac::pls_restart_mac_app(arguments);
 }
 
 LIBUTILSAPI_API QString pls_get_existed_downloaded_mac_app(const QString &downloadedBundleDir, const QString &downloadedVersion, bool deleteBundleExceptUpdatedBundle)
@@ -1904,6 +2486,17 @@ LIBUTILSAPI_API QString pls_get_current_system_language_id()
 
 #endif
 
+LIBUTILSAPI_API QString pls_get_os_ver_string()
+{
+#ifdef Q_OS_WIN
+	auto wv = pls_get_win_ver();
+	return QString("Windows %1.%2.%3.%4").arg(wv.major).arg(wv.minor).arg(wv.build).arg(wv.revis);
+#else
+	pls_mac_ver_t ver = pls_get_mac_systerm_ver();
+	return QString("Mac %1.%2.%3").arg(ver.major).arg(ver.minor).arg(ver.patch);
+#endif
+}
+
 LIBUTILSAPI_API std::wstring pls_utf8_to_unicode(const char *utf8)
 {
 	if (pls_is_empty(utf8)) {
@@ -1941,12 +2534,12 @@ LIBUTILSAPI_API std::string pls_unicode_to_utf8(const wchar_t *unicode)
 
 LIBUTILSAPI_API bool pls_get_app_exiting()
 {
-	return LocalGlobalVars::g_app_exiting;
+	return LocalGlobalVars::g_app_exiting == 1;
 }
 
 LIBUTILSAPI_API void pls_set_app_exiting(bool value)
 {
-	LocalGlobalVars::g_app_exiting = value;
+	LocalGlobalVars::g_app_exiting = value ? 1 : 0;
 }
 
 LIBUTILSAPI_API void pls_env_add_path(const QByteArray &path)
@@ -2027,6 +2620,35 @@ LIBUTILSAPI_API bool pls_check_qobject_id(const QObject *object, qulonglong obje
 		return object_pool()->get_qobject_id(object) == object_id;
 	}
 	return false;
+}
+
+LIBUTILSAPI_API bool pls_add_object_getter(const QObject *object, const QByteArray &name, const pls_getter_t &getter)
+{
+	return object_pool()->add_getter(object, name, getter);
+}
+LIBUTILSAPI_API void pls_remove_object_getter(const QObject *object, const QByteArray &name)
+{
+	object_pool()->remove_getter(object, name);
+}
+LIBUTILSAPI_API QVariant pls_call_object_getter(const QObject *object, const QByteArray &name)
+{
+	if (auto getter = object_pool()->get_getter(object, name); getter)
+		return getter();
+	return QVariant();
+}
+LIBUTILSAPI_API
+bool pls_add_object_setter(const QObject *object, const QByteArray &name, const pls_setter_t &setter)
+{
+	return object_pool()->add_setter(object, name, setter);
+}
+LIBUTILSAPI_API void pls_remove_object_setter(const QObject *object, const QByteArray &name)
+{
+	object_pool()->remove_setter(object, name);
+}
+LIBUTILSAPI_API void pls_call_object_setter(const QObject *object, const QByteArray &name, const QVariant &value)
+{
+	if (auto setter = object_pool()->get_setter(object, name); setter)
+		setter(value);
 }
 
 LIBUTILSAPI_API int pls_get_platform_window_height_by_windows_height(int windowsHeight)
@@ -2227,9 +2849,53 @@ LIBUTILSAPI_API bool pls_is_mouse_pressed(Qt::MouseButton button)
 #endif
 }
 
+#if defined(Q_OS_MACOS)
+LIBUTILSAPI_API void pls_set_current_lens(int index)
+{
+	pls_libutil_api_mac::pls_set_current_lens(index);
+}
+#endif
+
+LIBUTILSAPI_API bool pls_is_os_sys_macos()
+{
+#if defined(Q_OS_MACOS)
+	return true;
+#else
+	return false;
+#endif
+}
+LIBUTILSAPI_API bool pls_set_temp_sharememory(const QString &key, const QString &val)
+{
+	QSharedMemory objSharedMemory(shared_values::k_daemon_sm_key);
+	if (!objSharedMemory.isAttached()) {
+		if (!objSharedMemory.attach()) {
+			PLS_INFO("sharememory", "Failed to attach shared memory to the process!!!!, %s", objSharedMemory.errorString().toUtf8().constData());
+			return false;
+		}
+	}
+	QBuffer buffer;
+	buffer.open(QBuffer::WriteOnly);
+	QDataStream out(&buffer);
+	QString fileName = val;
+	out << fileName;
+	objSharedMemory.lock();
+	auto to = objSharedMemory.data();
+	const char *from = buffer.data().data();
+	memcpy(to, from, qMin(static_cast<qint64>(objSharedMemory.size()), buffer.size()));
+	objSharedMemory.unlock();
+	buffer.close();
+
+	objSharedMemory.detach();
+	return true;
+}
+
 LIBUTILSAPI_API uint64_t pls_get_prism_version()
 {
 	return LocalGlobalVars::g_prism_version;
+}
+LIBUTILSAPI_API QString pls_get_prism_version_string()
+{
+	return QString("%1.%2.%3.%4").arg(pls_get_prism_version_major()).arg(pls_get_prism_version_minor()).arg(pls_get_prism_version_patch()).arg(pls_get_prism_version_build());
 }
 LIBUTILSAPI_API void pls_set_prism_version(uint64_t version)
 {
@@ -2239,8 +2905,8 @@ LIBUTILSAPI_API void pls_set_prism_version(uint16_t major, uint16_t minor, uint1
 {
 	uint64_t version = major;
 	version = (version << 16) | minor;
-	version = (version << 32) | patch;
-	version = (version << 48) | build;
+	version = (version << 16) | patch;
+	version = (version << 16) | build;
 	pls_set_prism_version(version);
 }
 LIBUTILSAPI_API uint16_t pls_get_prism_version_major()
@@ -2334,4 +3000,353 @@ LIBUTILSAPI_API pls_queue_item_t *pls_thread_queue_pop(pls_thread_t *thread)
 LIBUTILSAPI_API pls_queue_item_t *pls_thread_queue_try_pop(pls_thread_t *thread)
 {
 	return thread->m_sem.try_acquire() ? pls_locked_queue_pop(&thread->m_queue) : nullptr;
+}
+LIBUTILSAPI_API bool pls_open_url(const QString &url)
+{
+#if defined(Q_OS_WIN)
+	bool isUrl = url.startsWith("http");
+
+	SHELLEXECUTEINFO sei;
+	ZeroMemory(&sei, sizeof(sei));
+	sei.cbSize = sizeof(sei);
+	sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+	sei.nShow = SW_SHOWNORMAL;
+	sei.lpVerb = L"open";
+	sei.lpParameters = reinterpret_cast<const wchar_t *>(url.utf16());
+
+	std::wstring browserPath{};
+	if (!isUrl) {
+		WCHAR explorerPath[255] = {0};
+		GetWindowsDirectory(explorerPath, 255);
+		PathAppend(explorerPath, TEXT("explorer.exe"));
+		browserPath = explorerPath;
+	} else {
+		QSettings settings("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\http\\UserChoice", QSettings::NativeFormat);
+		auto proId = settings.value("Progid").toString();
+		QSettings settings_2(QString("HKEY_CLASSES_ROOT\\%1\\shell\\open\\command").arg(proId), QSettings::NativeFormat);
+		auto path = settings_2.value("Default").toString();
+		QRegularExpression reg("\"([^\"]*)\"");
+		path = reg.match(path).captured(0).remove('"');
+		browserPath = path.toStdWString();
+	}
+	sei.lpFile = browserPath.c_str();
+	bool ret = false;
+	return ShellExecuteEx(&sei);
+#elif defined(Q_OS_MACOS)
+	return pls_libutil_api_mac::pls_open_url_mac(url);
+#endif
+}
+
+LIBUTILSAPI_API bool pls_lens_needs_reboot()
+{
+#if defined(Q_OS_WIN)
+	return false;
+#elif defined(Q_OS_MACOS)
+	return pls_libutil_api_mac::pls_lens_needs_reboot();
+#endif
+}
+
+LIBUTILSAPI_API bool pls_check_local_host()
+{
+	std::string ipAddress;
+	QHostInfo info = QHostInfo::fromName(QHostInfo::localHostName());
+	foreach(QHostAddress address, info.addresses())
+	{
+		if (address.protocol() == QAbstractSocket::IPv4Protocol) {
+			ipAddress = address.toString().toStdString();
+			std::regex regExp("10.(34|25).*");
+			auto matched = std::regex_match(ipAddress, regExp);
+			if (matched) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+struct Condition {
+	enum class Op {
+		Unknown,          // unknown
+		And,              // &&
+		Or,               // ||
+		Equal,            // =
+		LessThan,         // <
+		LessThanEqual,    // <=
+		GreaterThan,      // >
+		GreaterThanEqual, // >=
+		LeftBracket,      // (
+		RightBracket      // )
+	} op;
+	enum class OS { //
+		All,
+		Windows,
+		MacOS
+	};
+	bool value;
+
+	static bool isLogic(Op op) { return op == Op::And || op == Op::Or; }
+	static bool isCompare(Op op) { return op == Op::Equal || op == Op::LessThan || op == Op::LessThanEqual || op == Op::GreaterThan || op == Op::GreaterThanEqual; }
+	static bool isBracket(Op op) { return op == Op::LeftBracket || op == Op::RightBracket; }
+
+	static void skipSpace(const QByteArray &expression, int &pos, int length)
+	{
+		while (pos < length) {
+			if (expression[pos] == ' ')
+				++pos;
+			else
+				break;
+		}
+	}
+	static Op getOp(const QByteArray &expression, int &pos, int length)
+	{
+		skipSpace(expression, pos, length);
+
+		if (pos >= length)
+			return Op::Unknown;
+
+		if ((length - pos) > 1) {
+			if (expression[pos] == '&' && expression[pos + 1] == '&') {
+				pos += 2;
+				return Op::And;
+			} else if (expression[pos] == '|' && expression[pos + 1] == '|') {
+				pos += 2;
+				return Op::Or;
+			} else if (expression[pos] == '<' && expression[pos + 1] == '=') {
+				pos += 2;
+				return Op::LessThanEqual;
+			} else if (expression[pos] == '>' && expression[pos + 1] == '=') {
+				pos += 2;
+				return Op::GreaterThanEqual;
+			}
+		}
+
+		if (expression[pos] == '<') {
+			pos += 1;
+			return Op::LessThan;
+		} else if (expression[pos] == '>') {
+			pos += 1;
+			return Op::GreaterThan;
+		} else if (expression[pos] == '=') {
+			pos += 1;
+			return Op::Equal;
+		} else if (expression[pos] == '(') {
+			pos += 1;
+			return Op::LeftBracket;
+		} else if (expression[pos] == ')') {
+			pos += 1;
+			return Op::RightBracket;
+		} else {
+			return Op::Unknown;
+		}
+	}
+	static bool getVer(QPair<Condition::OS, QVersionNumber> &ver, const QByteArray &expression, int &pos, int length)
+	{
+		Condition::skipSpace(expression, pos, length);
+
+		if (qstrnicmp("win", expression.data() + pos, 3) == 0) {
+			ver.first = Condition::OS::Windows;
+			pos += 3;
+		} else if (qstrnicmp("mac", expression.data() + pos, 3) == 0) {
+			ver.first = Condition::OS::MacOS;
+			pos += 3;
+		} else {
+			ver.first = Condition::OS::All;
+		}
+
+		int start = pos;
+		while (pos < length) {
+			auto ch = expression[pos];
+			if ((ch >= '0' && ch <= '9') || (ch == '.'))
+				++pos;
+			else
+				break;
+		}
+
+		if (pos <= start)
+			return false;
+
+		auto version = expression.mid(start, pos - start);
+		ver.second = QVersionNumber::fromString(QString::fromUtf8(version));
+		return true;
+	}
+
+	static Op topOp(const QStack<Condition> &conditions)
+	{
+		if (!conditions.isEmpty())
+			return conditions.top().op;
+		return Op::Unknown;
+	}
+	static bool calc(Op op, const QVersionNumber &ver, const QVersionNumber &version)
+	{
+		switch (op) {
+		case Op::Equal:
+			return version == ver;
+		case Op::LessThan:
+			return version < ver;
+		case Op::LessThanEqual:
+			return version <= ver;
+		case Op::GreaterThan:
+			return version > ver;
+		case Op::GreaterThanEqual:
+			return version >= ver;
+		default:
+			return false;
+		}
+	}
+	static bool calc(QStack<Condition> &conditions)
+	{
+		if (conditions.size() < 2)
+			return false;
+
+		auto v1 = conditions.top();
+		conditions.pop();
+		auto op = conditions.top();
+		conditions.pop();
+		switch (op.op) {
+		case Op::Or:
+			if (conditions.isEmpty()) {
+				return false;
+			} else if (auto &v2 = conditions.top(); isCompare(v2.op)) {
+				v2.value = v2.value || v1.value;
+				return calc(conditions);
+			} else {
+				return false;
+			}
+		case Op::LeftBracket:
+			conditions.push(v1);
+			return true;
+		default:
+			return false;
+		}
+	}
+	static bool checkOS(Condition::OS os)
+	{
+		return (os == Condition::OS::All
+#ifdef Q_OS_WIN
+			|| os == Condition::OS::Windows
+#else // mac os
+			|| os == Condition::OS::MacOS
+#endif
+		);
+	}
+	static bool push(QStack<Condition> &conditions, const Condition &condition)
+	{
+		switch (condition.op) {
+		case Condition::Op::And:
+		case Condition::Op::Or:
+			if (!isCompare(topOp(conditions)))
+				return false;
+			conditions.push(condition);
+			return true;
+		case Condition::Op::Equal:
+		case Condition::Op::LessThan:
+		case Condition::Op::LessThanEqual:
+		case Condition::Op::GreaterThan:
+		case Condition::Op::GreaterThanEqual:
+			if (auto topOp = Condition::topOp(conditions); topOp == Op::Unknown || topOp == Op::Or || topOp == Op::LeftBracket) {
+				conditions.push(condition);
+				return true;
+			} else if (topOp == Op::And) {
+				conditions.pop();
+				auto &top = conditions.top();
+				top.value = top.value && condition.value;
+				return true;
+			} else {
+				return false;
+			}
+		case Condition::Op::LeftBracket:
+			if (!(conditions.isEmpty() || isLogic(topOp(conditions))))
+				return false;
+			conditions.push(condition);
+			return true;
+		case Condition::Op::RightBracket: {
+			if (!isCompare(topOp(conditions)))
+				return false;
+			else if (!Condition::calc(conditions))
+				return false;
+			return true;
+		}
+		case Condition::Op::Unknown:
+		default:
+			return false;
+		}
+	}
+};
+
+std::optional<bool> pls_check_version(const QByteArray &expression, const QVersionNumber &version)
+{
+	int pos = 0;
+	int length = expression.length();
+
+	QStack<Condition> conditions;
+	while (pos < length) {
+		auto op = Condition::getOp(expression, pos, length);
+		switch (op) {
+		case Condition::Op::And:
+		case Condition::Op::Or:
+		case Condition::Op::LeftBracket:
+		case Condition::Op::RightBracket:
+			if (!Condition::push(conditions, {op, true}))
+				return std::nullopt;
+			break;
+		case Condition::Op::Equal:
+		case Condition::Op::LessThan:
+		case Condition::Op::LessThanEqual:
+		case Condition::Op::GreaterThan:
+		case Condition::Op::GreaterThanEqual:
+			if (QPair<Condition::OS, QVersionNumber> ver; !Condition::getVer(ver, expression, pos, length))
+				return std::nullopt;
+			else if (!Condition::push(conditions, {op, Condition::checkOS(ver.first) && Condition::calc(op, ver.second, version)}))
+				return std::nullopt;
+			break;
+		case Condition::Op::Unknown:
+		default:
+			return std::nullopt;
+		}
+	}
+
+	if (conditions.size() > 1)
+		Condition::calc(conditions);
+
+	if (conditions.size() != 1)
+		return std::nullopt;
+	else if (auto condition = conditions.top(); Condition::isCompare(condition.op))
+		return condition.value;
+	return std::nullopt;
+}
+
+LIBUTILSAPI_API bool pls_is_equal(const QVariant &v1, const QVariant &v2, Qt::CaseSensitivity cs)
+{
+	if (v1.isNull() && v2.isNull())
+		return true;
+	else if (v1.typeId() != v2.typeId())
+		return false;
+	switch (v1.typeId()) {
+	case QMetaType::Bool:
+		return v1.toBool() == v2.toBool();
+	case QMetaType::Short:
+	case QMetaType::Int:
+	case QMetaType::Long:
+	case QMetaType::LongLong:
+		return v1.toLongLong() == v2.toLongLong();
+	case QMetaType::UShort:
+	case QMetaType::UInt:
+	case QMetaType::ULong:
+	case QMetaType::ULongLong:
+		return v1.toULongLong() == v2.toULongLong();
+	case QMetaType::Float:
+	case QMetaType::Double:
+		return pls_is_equal(v1.toDouble(), v2.toDouble());
+	case QMetaType::QString:
+		return pls_is_equal(v1.toString(), v2.toString(), cs);
+	case QMetaType::QStringList:
+		return pls_is_equal(v1.toStringList(), v2.toStringList(), cs);
+	case QMetaType::QVariantList:
+		return pls_is_equal(v1.toList(), v2.toList(), cs);
+	case QMetaType::QVariantHash:
+		return pls_is_equal(v1.toHash(), v2.toHash(), cs);
+	case QMetaType::QVariantMap:
+		return pls_is_equal(v1.toMap(), v2.toMap(), cs);
+	}
+	return true;
 }

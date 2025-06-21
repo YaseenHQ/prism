@@ -2,6 +2,7 @@
 #include <QJsonDocument>
 #include <QString>
 #include <QVariantMap>
+#include "PLSErrorHandler.h"
 #include "pls-channel-const.h"
 class QNetworkReply;
 using ReplyPtrs = QSharedPointer<QNetworkReply>;
@@ -21,10 +22,7 @@ void showChannelInfo(const QString &uuid);
 /* API for show share view */
 void showShareView(const QString &channelUUID);
 
-int showSummaryView();
-void showChatView(bool isRebackLogin = false, bool isOnlyShow = false, bool isOnlyInit = false);
-
-void addLoginChannel(const QJsonObject &retJson);
+void addLoginChannel(const QVariantMap &retMap);
 bool updateChannelInfoFromNet(const QString &uuid);
 
 void sortInfosByKey(InfosList &infos, const QString &sortKey);
@@ -40,33 +38,17 @@ bool updateChannelTypeFromNet(const QString &uuid, bool bRefresh = false);
 bool updateRTMPTypeFromNet(const QString &uuid);
 void showResolutionTips(const QString &platform);
 
-QVariantMap createErrorMap(int errorType);
-void addErrorForType(int errorType);
 void addErrorFromInfo(const QVariantMap &info);
-
-QVariantMap createScheduleGetError(const QString &platform, ChannelData::NetWorkErrorType errorType = ChannelData::NetWorkErrorType::NetWorkNoStable);
+void addErrorFromRetData(const PLSErrorHandler::RetData &data);
+QVariantMap createScheduleGetError(const QString &platform, const PLSErrorHandler::RetData &data);
 
 void refreshChannel(const QString &uuid);
 
 void resetChannel(const QString &uuid);
 void resetExpiredChannel(const QString &uuid, bool toAsk = true);
-void reloginChannel(const QString &platformName, bool toAsk = true);
+void reloginChannel(const QString &platformName, bool toAsk = true, const PLSErrorHandler::RetData &data = {});
 
-int getReplyContentCode(const QByteArray &data);
-
-template<typename ReplyType> bool isPrismReplyExpired(ReplyType reply, const QByteArray &data)
-{
-	int netCode = getReplyStatusCode(reply);
-	auto doc = QJsonDocument::fromJson(data);
-	int code = getReplyContentCode(data);
-
-	if (netCode == 401 && code == 3000) {
-		return true;
-	}
-	return false;
-}
-
-void reloginPrismExpired();
+void reloginPrismExpired(const PLSErrorHandler::RetData &data);
 //reset channel state when end live ,try check channel state and delete
 void resetAllChannels();
 
@@ -74,7 +56,7 @@ void refreshAllChannels();
 
 void handleEmptyChannel(const QString &uuid);
 
-void addRTMP();
+void addRTMP(const QString &channleName = QString());
 void editRTMP(const QString &uuid);
 void runCMD(const QString &cmdStr);
 
@@ -113,8 +95,7 @@ void disableAll();
 LoadingFrame *createBusyFrame(QWidget *parent = nullptr);
 
 void showNetworkErrorAlert();
-void showErrorAlert(int errorType);
-void showNetworkAlertOnlyOnce();
+void showAlertOnlyOnce(const PLSErrorHandler::RetData &data);
 
 void showChannelsSetting(int index = 0);
 

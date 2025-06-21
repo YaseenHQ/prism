@@ -37,6 +37,8 @@ void bringWindowToTop(const QWidget *window);
 
 bool SetDisplayAffinitySupported(void);
 
+bool HighContrastEnabled();
+
 enum TaskbarOverlayStatus {
 	TaskbarOverlayStatusInactive,
 	TaskbarOverlayStatusActive,
@@ -102,6 +104,7 @@ bool isInBundle();
 void InstallNSApplicationSubclass();
 void InstallNSThreadLocks();
 void disableColorSpaceConversion(QWidget *window);
+void SetMacOSDarkMode(bool dark);
 
 MacPermissionStatus CheckPermissionWithPrompt(MacPermissionType type,
 					      bool prompt_for_permission);
