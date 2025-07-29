@@ -25,7 +25,6 @@ const QString MQTT_SERVER_PW_DEV = "";
 const QString MQTT_SERVER_WEB_DEV = "";
 
 // Prism auth api
-// http://dev-auth.prism.navercorp.com/
 const QString PRISM_AUTH_API_BASE_DEV = "";
 
 const QString PLS_FACEBOOK_LOGIN_URL_DEV = PRISM_AUTH_API_BASE_DEV;
